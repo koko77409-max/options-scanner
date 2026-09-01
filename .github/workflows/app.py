@@ -1,20 +1,3 @@
-這個報錯的原因是：當市場在極端情況下**沒有掃描到任何符合條件的標的**時，`cand_df` 會返回一個**空的 DataFrame（沒有任何欄位）**。當程式試圖執行 `cand_df['Squeeze現狀']` 時，Pandas 因為找不到該欄位名稱而拋出 `KeyError`。
-
-此外，你的檔案路徑顯示為 `/mount/src/options-scanner/.github/workflows/app.py`，建議將 `app.py` 放在倉庫根目錄下，避免路徑混淆。
-
----
-
-### 修復方案
-
-為空的 DataFrame 預先定義好結構欄位，並在調用前加入防護判斷（`if not cand_df.empty and 'Squeeze現狀' in cand_df.columns`）。
-
----
-
-### 修復後的完整代碼 (`app.py` - v2.5.1)
-
-請將以下代碼覆蓋到 GitHub 上的 `app.py`：
-
-```python
 from datetime import datetime
 import warnings
 import numpy as np
@@ -394,7 +377,3 @@ st.markdown(
     f"</div>",
     unsafe_allow_html=True,
 )
-
-```
-
-覆蓋儲存後，即便當天市場沒有任何標的觸發，頁面也會安全顯示 `0 隻` 與提示訊息，徹底消除 `KeyError` 崩潰問題。
