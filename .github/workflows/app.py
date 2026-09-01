@@ -6,11 +6,11 @@ import streamlit as st
 import yfinance as yf
 
 # ==========================================
-# 版本號定義 (每次更新在此修改)
+# 版本號定義
 # ==========================================
-APP_VERSION = "v2.4.1"
+APP_VERSION = "v2.5.0"
 BUILD_DATE = "2026-09-01"
-BUILD_TAG = "UI Clean Fixed & TP/SL Engine"
+BUILD_TAG = "RR Ratio Threshold Filter & High Quality Spreads Only"
 
 warnings.filterwarnings("ignore")
 
@@ -48,7 +48,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 側邊欄配置 (已修復 HTML 代碼外露問題)
+# 側邊欄配置
 st.sidebar.title("⚙️ 策略參數配置")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
 
@@ -68,6 +68,16 @@ max_budget = st.sidebar.number_input(
     max_value=2000,
     value=350,
     step=50,
+)
+
+# 新增：最低盈虧比門檻過濾
+min_rr_ratio = st.sidebar.slider(
+    "🔥 最低盈虧比門檻 (1 : X)",
+    min_value=1.0,
+    max_value=3.0,
+    value=1.5,
+    step=0.1,
+    help="低於此盈虧比的合約組合將自動被系統剔除，不予顯示",
 )
 
 st.sidebar.markdown("### 🎯 止盈止損參數")
@@ -161,13 +171,13 @@ def run_scan(tickers, atr_mult):
             continue
     return pd.DataFrame(candidates)
 
-def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct):
+def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr):
     if candidates_df.empty:
         return pd.DataFrame()
     today = datetime.today()
     spreads = []
 
-    for _, row in candidates_df.head(10).iterrows():
+    for _, row in candidates_df.head(15).iterrows():
         sym, curr_price, direction = row["Symbol"], row["Price"], row["Direction"]
         try:
             ticker = yf.Ticker(sym)
@@ -215,6 +225,10 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
 
+                # 盈虧比過濾：低於門檻直接略過
+                if rr < min_rr:
+                    continue
+
                 tp_amt_min = round(max_profit * tp_min_pct, 1)
                 tp_amt_max = round(max_profit * tp_max_pct, 1)
                 target_close_price_min = round(net_debit + (tp_amt_min / 100.0), 2)
@@ -236,6 +250,7 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     "目標平倉單價 ($)": f"${target_close_price_min} ~ ${target_close_price_max}",
                     "剛性止損 ($)": f"-${sl_amt} (40%)",
                     "Cost_Num": cost,
+                    "RR_Num": rr,
                 })
 
             # ---------------- 空頭 (Bear Put Spread) ----------------
@@ -267,6 +282,10 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
 
+                # 盈虧比過濾：低於門檻直接略過
+                if rr < min_rr:
+                    continue
+
                 tp_amt_min = round(max_profit * tp_min_pct, 1)
                 tp_amt_max = round(max_profit * tp_max_pct, 1)
                 target_close_price_min = round(net_debit + (tp_amt_min / 100.0), 2)
@@ -288,10 +307,16 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     "目標平倉單價 ($)": f"${target_close_price_min} ~ ${target_close_price_max}",
                     "剛性止損 ($)": f"-${sl_amt} (40%)",
                     "Cost_Num": cost,
+                    "RR_Num": rr,
                 })
         except Exception:
             continue
-    return pd.DataFrame(spreads)
+
+    df_out = pd.DataFrame(spreads)
+    if not df_out.empty:
+        # 按盈虧比由高至低嚴格排序
+        df_out = df_out.sort_values(by="RR_Num", ascending=False)
+    return df_out
 
 # 執行按鈕
 if st.button("🚀 開始執行全市場量化掃描"):
@@ -299,7 +324,7 @@ if st.button("🚀 開始執行全市場量化掃描"):
         cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier)
         st.session_state["cand_df"] = cand_df
         st.session_state["spread_df"] = get_options_spreads(
-            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio
+            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio
         )
 
 if "cand_df" in st.session_state:
@@ -309,17 +334,20 @@ if "cand_df" in st.session_state:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("掃描標的池", f"{len(DEFAULT_WATCHLIST)} 隻")
     col2.metric("Squeeze 蓄勢中", f"{len(cand_df[cand_df['Squeeze現狀']])} 隻")
-    col3.metric("匹配價差合約", f"{len(spread_df)} 組")
-    col4.metric("小資金預算篩選 (< ${max_budget})", f"{max_budget} 美元")
+    col3.metric("高賠率期權組合", f"{len(spread_df)} 組")
+    col4.metric(f"預算篩選 (< ${max_budget})", f"{max_budget} 美元")
 
-    st.markdown("### 🎯 精選期權價差組合與預期離場價格")
+    st.markdown(f"### 🎯 精選高性價比期權組合 (已過濾 RR ≥ 1 : {min_rr_ratio})")
     if not spread_df.empty:
         filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget].drop(
-            columns=["Cost_Num"]
+            columns=["Cost_Num", "RR_Num"]
         )
-        st.dataframe(filtered_spreads, use_container_width=True, hide_index=True)
+        if not filtered_spreads.empty:
+            st.dataframe(filtered_spreads, use_container_width=True, hide_index=True)
+        else:
+            st.warning(f"在單注預算 ${max_budget} 內，暫無符合 RR ≥ 1:{min_rr_ratio} 的期權組合。")
     else:
-        st.warning("未匹配到合適的期權價差組合。")
+        st.warning(f"未找到符合盈虧比 ≥ 1:{min_rr_ratio} 的期權組合。")
 
     st.markdown("### 📋 技術形態候選池")
     st.dataframe(cand_df, use_container_width=True, hide_index=True)
