@@ -8,9 +8,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義 (每次更新在此修改)
 # ==========================================
-APP_VERSION = "v2.4.0"
+APP_VERSION = "v2.4.1"
 BUILD_DATE = "2026-09-01"
-BUILD_TAG = "Fixed Spreads Sorting & TP/SL Precision Engine"
+BUILD_TAG = "UI Clean Fixed & TP/SL Engine"
 
 warnings.filterwarnings("ignore")
 
@@ -48,8 +48,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 側邊欄配置
-st.sidebar.markdown(f"### ⚙️ 策略參數配置 `<span class='version-badge'>{APP_VERSION}</span>`", unsafe_allow_html=True)
+# 側邊欄配置 (已修復 HTML 代碼外露問題)
+st.sidebar.title("⚙️ 策略參數配置")
+st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
+
 dte_min, dte_max = st.sidebar.slider(
     "期權到期日範圍 (DTE)", min_value=14, max_value=60, value=(20, 45)
 )
@@ -85,7 +87,7 @@ sl_ratio = (
 st.sidebar.markdown("---")
 st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`\n\n特性：`{BUILD_TAG}`")
 
-# 頂部標題與版本展示
+# 頂部標題展示
 col_title, col_ver = st.columns([4, 1])
 with col_title:
     st.markdown(
