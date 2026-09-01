@@ -5,11 +5,18 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+# ==========================================
+# 版本號定義 (每次更新在此修改)
+# ==========================================
+APP_VERSION = "v2.4.0"
+BUILD_DATE = "2026-09-01"
+BUILD_TAG = "Fixed Spreads Sorting & TP/SL Precision Engine"
+
 warnings.filterwarnings("ignore")
 
 # 頁面配置
 st.set_page_config(
-    page_title="美股期權量化埋伏系統",
+    page_title=f"美股期權量化埋伏系統 ({APP_VERSION})",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -25,6 +32,16 @@ st.markdown(
         border-radius: 12px;
         padding: 16px;
     }
+    .version-badge {
+        background: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-family: monospace;
+        font-weight: bold;
+    }
     .stDataFrame { border-radius: 12px; overflow: hidden; }
 </style>
 """,
@@ -32,7 +49,7 @@ st.markdown(
 )
 
 # 側邊欄配置
-st.sidebar.title("⚙️ 策略參數配置")
+st.sidebar.markdown(f"### ⚙️ 策略參數配置 `<span class='version-badge'>{APP_VERSION}</span>`", unsafe_allow_html=True)
 dte_min, dte_max = st.sidebar.slider(
     "期權到期日範圍 (DTE)", min_value=14, max_value=60, value=(20, 45)
 )
@@ -66,14 +83,21 @@ sl_ratio = (
 )
 
 st.sidebar.markdown("---")
-st.sidebar.info(
-    "💡 **止盈鐵律**：賺取最大利潤的 50%–70% 即應主動平倉，切忌硬等到期日博取最後 30% 利潤而承擔反轉風險。"
-)
+st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`\n\n特性：`{BUILD_TAG}`")
 
-st.title("📊 美股小資金期權量化埋伏儀表板")
-st.caption(
-    "基於 TTM Squeeze 波動率收斂 + 均線多空排列 + 跨價期權組合 (Vertical Spreads) 自動止盈止損定價"
-)
+# 頂部標題與版本展示
+col_title, col_ver = st.columns([4, 1])
+with col_title:
+    st.markdown(
+        f"## 📊 美股小資金期權量化埋伏儀表板 <span class='version-badge'>{APP_VERSION}</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption("基於 TTM Squeeze 波動率收斂 + 均線多空排列 + 跨價期權組合 (Vertical Spreads) 自動止盈止損定價")
+with col_ver:
+    st.markdown(
+        f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心引擎：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
+        unsafe_allow_html=True,
+    )
 
 DEFAULT_WATCHLIST = [
     "SPY", "QQQ", "IWM", "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN",
@@ -165,7 +189,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                 calls = chain.calls.copy()
                 if calls.empty:
                     continue
-                # 【修復 1】：強制按行使價升序排序
                 calls = calls.sort_values("strike", ascending=True)
 
                 b_cands = calls[calls["strike"] >= curr_price]
@@ -174,7 +197,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
 
                 b_leg = b_cands.iloc[0]
-                # 確保賣出腿行使價嚴格大於買入腿
                 s_valid = s_cands[s_cands["strike"] > b_leg["strike"]]
                 if s_valid.empty:
                     continue
@@ -219,7 +241,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                 puts = chain.puts.copy()
                 if puts.empty:
                     continue
-                # 【修復 1】：強制按行使價升序排序
                 puts = puts.sort_values("strike", ascending=True)
 
                 b_cands = puts[puts["strike"] <= curr_price]
@@ -228,7 +249,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
 
                 b_leg = b_cands.iloc[-1]
-                # 確保賣出腿行使價嚴格小於買入腿
                 s_valid = s_cands[s_cands["strike"] < b_leg["strike"]]
                 if s_valid.empty:
                     continue
@@ -239,7 +259,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
 
                 net_debit = max(0.05, round(b_p - s_p, 2))
                 cost = round(net_debit * 100, 2)
-                # 【修復 2】：Bear Put 價差為買入高價減賣出低價
                 spread_width = b_leg["strike"] - s_leg["strike"]
                 max_profit = round((spread_width * 100) - cost, 2)
                 if max_profit <= 0:
@@ -302,3 +321,12 @@ if "cand_df" in st.session_state:
 
     st.markdown("### 📋 技術形態候選池")
     st.dataframe(cand_df, use_container_width=True, hide_index=True)
+
+# 頁尾版本標記
+st.markdown("---")
+st.markdown(
+    f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
+    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Risk Defined Vertical Spreads Strategy"
+    f"</div>",
+    unsafe_allow_html=True,
+)
