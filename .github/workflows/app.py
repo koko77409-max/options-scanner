@@ -8,9 +8,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v2.5.0"
+APP_VERSION = "v2.5.1"
 BUILD_DATE = "2026-09-01"
-BUILD_TAG = "RR Ratio Threshold Filter & High Quality Spreads Only"
+BUILD_TAG = "KeyError Empty DataFrame Safeguard Fixed"
 
 warnings.filterwarnings("ignore")
 
@@ -70,7 +70,7 @@ max_budget = st.sidebar.number_input(
     step=50,
 )
 
-# 新增：最低盈虧比門檻過濾
+# 最低盈虧比門檻過濾
 min_rr_ratio = st.sidebar.slider(
     "🔥 最低盈虧比門檻 (1 : X)",
     min_value=1.0,
@@ -169,11 +169,21 @@ def run_scan(tickers, atr_mult):
                 })
         except Exception:
             continue
+
+    if not candidates:
+        return pd.DataFrame(columns=["Symbol", "Direction", "Price", "20MA", "Vol_Ratio", "壓縮比率", "Squeeze現狀"])
+    
     return pd.DataFrame(candidates)
 
 def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr):
+    columns_list = [
+        "標的", "方向", "現價", "到期日", "組合策略", "買入腿 (Long)",
+        "賣出腿 (Short)", "淨成本 ($)", "最大獲利 ($)", "盈虧比",
+        "建議止盈獲利 ($)", "目標平倉單價 ($)", "剛性止損 ($)", "Cost_Num", "RR_Num"
+    ]
     if candidates_df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=columns_list)
+        
     today = datetime.today()
     spreads = []
 
@@ -225,7 +235,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
 
-                # 盈虧比過濾：低於門檻直接略過
                 if rr < min_rr:
                     continue
 
@@ -282,7 +291,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
 
-                # 盈虧比過濾：低於門檻直接略過
                 if rr < min_rr:
                     continue
 
@@ -312,10 +320,11 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
         except Exception:
             continue
 
+    if not spreads:
+        return pd.DataFrame(columns=columns_list)
+
     df_out = pd.DataFrame(spreads)
-    if not df_out.empty:
-        # 按盈虧比由高至低嚴格排序
-        df_out = df_out.sort_values(by="RR_Num", ascending=False)
+    df_out = df_out.sort_values(by="RR_Num", ascending=False)
     return df_out
 
 # 執行按鈕
@@ -331,14 +340,19 @@ if "cand_df" in st.session_state:
     cand_df = st.session_state["cand_df"]
     spread_df = st.session_state["spread_df"]
 
+    # 安全取值（防止 DataFrame 為空時報 KeyError）
+    squeeze_count = 0
+    if not cand_df.empty and "Squeeze現狀" in cand_df.columns:
+        squeeze_count = len(cand_df[cand_df["Squeeze現狀"]])
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("掃描標的池", f"{len(DEFAULT_WATCHLIST)} 隻")
-    col2.metric("Squeeze 蓄勢中", f"{len(cand_df[cand_df['Squeeze現狀']])} 隻")
+    col2.metric("Squeeze 蓄勢中", f"{squeeze_count} 隻")
     col3.metric("高賠率期權組合", f"{len(spread_df)} 組")
     col4.metric(f"預算篩選 (< ${max_budget})", f"{max_budget} 美元")
 
     st.markdown(f"### 🎯 精選高性價比期權組合 (已過濾 RR ≥ 1 : {min_rr_ratio})")
-    if not spread_df.empty:
+    if not spread_df.empty and "Cost_Num" in spread_df.columns:
         filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget].drop(
             columns=["Cost_Num", "RR_Num"]
         )
@@ -350,7 +364,10 @@ if "cand_df" in st.session_state:
         st.warning(f"未找到符合盈虧比 ≥ 1:{min_rr_ratio} 的期權組合。")
 
     st.markdown("### 📋 技術形態候選池")
-    st.dataframe(cand_df, use_container_width=True, hide_index=True)
+    if not cand_df.empty:
+        st.dataframe(cand_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("當前暫無符合條件的技術形態標的。")
 
 # 頁尾版本標記
 st.markdown("---")
