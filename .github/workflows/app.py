@@ -8,9 +8,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v2.6.0"
+APP_VERSION = "v2.7.0"
 BUILD_DATE = "2026-09-01"
-BUILD_TAG = "Auto Day-Trend & Intraday Anti-Fakeout Engine"
+BUILD_TAG = "Dual EMA Trend Alignment & Hysteresis Buffer Engine"
 
 warnings.filterwarnings("ignore")
 
@@ -80,13 +80,6 @@ min_rr_ratio = st.sidebar.slider(
     help="低於此盈虧比的合約組合將自動被系統剔除，不予顯示",
 )
 
-# 新增：開盤走勢防跳水過濾開關
-enforce_intraday_trend = st.sidebar.checkbox(
-    "🛡️ 啟用盤中防假突破過濾 (現價與開盤價同向)",
-    value=True,
-    help="做多必須現價 >= 開盤價且 > 20MA（紅轉綠跳水直接剔除）；做空必須現價 <= 開盤價且 < 20MA",
-)
-
 st.sidebar.markdown("### 🎯 止盈止損參數")
 tp_ratio_min = (
     st.sidebar.slider("最小止盈比率 (%)", min_value=30, max_value=80, value=50)
@@ -111,7 +104,7 @@ with col_title:
         f"## 📊 美股小資金期權量化埋伏儀表板 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("基於 TTM Squeeze 波動率收斂 + 盤中開盤價防跳水過濾 + 跨價期權組合 (Vertical Spreads)")
+    st.caption("基於 TTM Squeeze 波動率收斂 + EMA8/21 動量趨勢鎖定 + 跨價期權組合 (Vertical Spreads)")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心引擎：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -127,7 +120,7 @@ DEFAULT_WATCHLIST = [
     "UNH", "CAT", "GE", "COST", "WMT"
 ]
 
-def run_scan(tickers, atr_mult, check_intraday):
+def run_scan(tickers, atr_mult):
     candidates = []
     for sym in tickers:
         try:
@@ -135,12 +128,16 @@ def run_scan(tickers, atr_mult, check_intraday):
             if df.empty or len(df) < 30:
                 continue
             close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
-            open_p = df["Open"]
 
+            # 計算均線與指標
             ma20 = close.rolling(20).mean()
             std20 = close.rolling(20).std()
             bb_upper = ma20 + (2 * std20)
             bb_lower = ma20 - (2 * std20)
+
+            # 動量均線 (EMA 8 與 EMA 21)
+            ema8 = close.ewm(span=8, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
 
             tr1 = high - low
             tr2 = (high - close.shift(1)).abs()
@@ -154,23 +151,20 @@ def run_scan(tickers, atr_mult, check_intraday):
             recent_squeeze = bool(is_squeezing.tail(5).any())
 
             curr_close = float(close.iloc[-1])
-            curr_open = float(open_p.iloc[-1])
             curr_ma20 = float(ma20.iloc[-1])
+            curr_ema8 = float(ema8.iloc[-1])
+            curr_ema21 = float(ema21.iloc[-1])
 
-            # ---------------- 方向判斷與防跳水核心邏輯 ----------------
-            if check_intraday:
-                # 做多條件：現價在 20MA 之上 且 現價 >= 今日開盤價 (實體陽燭，非衝高回落)
-                is_bullish = (curr_close >= curr_ma20) and (curr_close >= curr_open)
-                # 做空條件：現價在 20MA 之下 且 現價 <= 今日開盤價 (實體陰燭，非低開反彈)
-                is_bearish = (curr_close < curr_ma20) and (curr_close <= curr_open)
-                
-                # 如果處於矛盾狀態（例如高開跳水跌破開盤但仍在20MA上，或低開衝高），視為雜訊直接不發出信號
-                if not is_bullish and not is_bearish:
-                    continue
-                direction_label = "多頭 (CALL)" if is_bullish else "空頭 (PUT)"
-            else:
-                is_bullish = curr_close >= curr_ma20
-                direction_label = "多頭 (CALL)" if is_bullish else "空頭 (PUT)"
+            # ---------------- 穩定性核心邏輯 (EMA動量 + 0.5% 容忍緩衝帶) ----------------
+            # 多頭：EMA8 >= EMA21 且 現價未大幅跌破 20MA (容許 0.5% 邊界緩衝)
+            is_bullish = (curr_ema8 >= curr_ema21) and (curr_close >= curr_ma20 * 0.995)
+            # 空頭：EMA8 < EMA21 且 現價未大幅突破 20MA (容許 0.5% 邊界緩衝)
+            is_bearish = (curr_ema8 < curr_ema21) and (curr_close <= curr_ma20 * 1.005)
+
+            if not is_bullish and not is_bearish:
+                continue
+
+            direction_label = "多頭 (CALL)" if is_bullish else "空頭 (PUT)"
 
             vol_ma20 = float(vol.rolling(20).mean().iloc[-1])
             curr_vol = float(vol.iloc[-1])
@@ -180,16 +174,13 @@ def run_scan(tickers, atr_mult, check_intraday):
             kc_w = kc_upper.iloc[-1] - kc_lower.iloc[-1]
             comp_ratio = round(float(bb_w / kc_w), 2) if kc_w > 0 else 1.0
 
-            day_change_pct = round(((curr_close - curr_open) / curr_open) * 100, 2)
-
             if recent_squeeze or comp_ratio < 1.05:
                 candidates.append({
                     "Symbol": sym,
                     "Direction": direction_label,
                     "Price": round(curr_close, 2),
-                    "Open": round(curr_open, 2),
-                    "當日漲跌(%)": f"{day_change_pct}%",
                     "20MA": round(curr_ma20, 2),
+                    "EMA8/21": "多頭排列" if is_bullish else "空頭排列",
                     "Vol_Ratio": vol_ratio,
                     "壓縮比率": comp_ratio,
                     "Squeeze現狀": bool(is_squeezing.iloc[-1]),
@@ -198,7 +189,7 @@ def run_scan(tickers, atr_mult, check_intraday):
             continue
 
     if not candidates:
-        return pd.DataFrame(columns=["Symbol", "Direction", "Price", "Open", "當日漲跌(%)", "20MA", "Vol_Ratio", "壓縮比率", "Squeeze現狀"])
+        return pd.DataFrame(columns=["Symbol", "Direction", "Price", "20MA", "EMA8/21", "Vol_Ratio", "壓縮比率", "Squeeze現狀"])
     
     return pd.DataFrame(candidates)
 
@@ -357,7 +348,7 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
 # 執行按鈕
 if st.button("🚀 開始執行全市場量化掃描"):
     with st.spinner("正在掃描市場 K 線與期權鏈數據..."):
-        cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier, enforce_intraday_trend)
+        cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier)
         st.session_state["cand_df"] = cand_df
         st.session_state["spread_df"] = get_options_spreads(
             cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio
@@ -387,7 +378,7 @@ if "cand_df" in st.session_state:
         else:
             st.warning(f"在單注預算 ${max_budget} 內，暫無符合 RR ≥ 1:{min_rr_ratio} 的期權組合。")
     else:
-        st.warning(f"未找到符合盈虧比 ≥ 1:{min_rr_ratio} 且通過盤中動量過濾的期權組合。")
+        st.warning(f"未找到符合盈虧比 ≥ 1:{min_rr_ratio} 的期權組合。")
 
     st.markdown("### 📋 技術形態候選池")
     if not cand_df.empty:
