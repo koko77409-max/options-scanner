@@ -5,16 +5,12 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# ==========================================
-# 版本號定義
-# ==========================================
-APP_VERSION = "v2.7.0"
-BUILD_DATE = "2026-09-01"
-BUILD_TAG = "Dual EMA Trend Alignment & Hysteresis Buffer Engine"
+APP_VERSION = "v2.8.0"
+BUILD_DATE = "2026-09-02"
+BUILD_TAG = "Auto Earnings Guard & Bid-Ask Spread Liquidity Shield"
 
 warnings.filterwarnings("ignore")
 
-# 頁面配置
 st.set_page_config(
     page_title=f"美股期權量化埋伏系統 ({APP_VERSION})",
     page_icon="📈",
@@ -22,16 +18,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 自訂暗黑交易終端 CSS
 st.markdown(
     """
 <style>
-    .metric-card {
-        background: rgba(30, 41, 59, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        padding: 16px;
-    }
     .version-badge {
         background: rgba(16, 185, 129, 0.15);
         color: #10b981;
@@ -42,69 +31,38 @@ st.markdown(
         font-family: monospace;
         font-weight: bold;
     }
-    .stDataFrame { border-radius: 12px; overflow: hidden; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# 側邊欄配置
 st.sidebar.title("⚙️ 策略參數配置")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
 
-dte_min, dte_max = st.sidebar.slider(
-    "期權到期日範圍 (DTE)", min_value=14, max_value=60, value=(20, 45)
-)
-atr_multiplier = st.sidebar.slider(
-    "肯特納通道 ATR 倍數 (收斂靈敏度)",
-    min_value=1.2,
-    max_value=2.5,
-    value=1.8,
-    step=0.1,
-)
-max_budget = st.sidebar.number_input(
-    "小資金單注最大預算 ($)",
-    min_value=20,
-    max_value=2000,
-    value=350,
-    step=50,
-)
+dte_min, dte_max = st.sidebar.slider("期權到期日範圍 (DTE)", 14, 60, (20, 45))
+atr_multiplier = st.sidebar.slider("肯特納通道 ATR 倍數", 1.2, 2.5, 1.8, 0.1)
+max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 2000, 350, 50)
+min_rr_ratio = st.sidebar.slider("🔥 最低盈虧比門檻 (1 : X)", 1.0, 3.0, 1.5, 0.1)
 
-# 最低盈虧比門檻過濾
-min_rr_ratio = st.sidebar.slider(
-    "🔥 最低盈虧比門檻 (1 : X)",
-    min_value=1.0,
-    max_value=3.0,
-    value=1.5,
-    step=0.1,
-    help="低於此盈虧比的合約組合將自動被系統剔除，不予顯示",
-)
+st.sidebar.markdown("### 🛡️ 全自動風控防護")
+avoid_earnings = st.sidebar.checkbox("自動剔除 7 天內即將公布財報標的 (防 IV 暴跌)", value=True)
+filter_liquidity = st.sidebar.checkbox("自動剔除流動性差 / 點差過闊合約 (防滑點)", value=True)
 
 st.sidebar.markdown("### 🎯 止盈止損參數")
-tp_ratio_min = (
-    st.sidebar.slider("最小止盈比率 (%)", min_value=30, max_value=80, value=50)
-    / 100.0
-)
-tp_ratio_max = (
-    st.sidebar.slider("理想止盈比率 (%)", min_value=50, max_value=90, value=70)
-    / 100.0
-)
-sl_ratio = (
-    st.sidebar.slider("剛性止損比率 (%)", min_value=20, max_value=60, value=40)
-    / 100.0
-)
+tp_ratio_min = st.sidebar.slider("最小止盈比率 (%)", 30, 80, 50) / 100.0
+tp_ratio_max = st.sidebar.slider("理想止盈比率 (%)", 50, 90, 70) / 100.0
+sl_ratio = st.sidebar.slider("剛性止損比率 (%)", 20, 60, 40) / 100.0
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`\n\n特性：`{BUILD_TAG}`")
 
-# 頂部標題展示
 col_title, col_ver = st.columns([4, 1])
 with col_title:
     st.markdown(
         f"## 📊 美股小資金期權量化埋伏儀表板 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("基於 TTM Squeeze 波動率收斂 + EMA8/21 動量趨勢鎖定 + 跨價期權組合 (Vertical Spreads)")
+    st.caption("TTM Squeeze 波動率收斂 + EMA 趨勢對齊 + 自動財報過濾 + 流動性點差防護引擎")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心引擎：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -120,22 +78,49 @@ DEFAULT_WATCHLIST = [
     "UNH", "CAT", "GE", "COST", "WMT"
 ]
 
-def run_scan(tickers, atr_mult):
+def check_earnings_risk(ticker_obj):
+    try:
+        cal = ticker_obj.calendar
+        if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty):
+            return False
+        earnings_date = None
+        if isinstance(cal, pd.DataFrame):
+            if "Earnings Date" in cal.index:
+                earnings_date = cal.loc["Earnings Date"].iloc[0]
+        elif isinstance(cal, dict):
+            if "Earnings Date" in cal and len(cal["Earnings Date"]) > 0:
+                earnings_date = cal["Earnings Date"][0]
+        if earnings_date:
+            if isinstance(earnings_date, str):
+                earnings_date = datetime.strptime(earnings_date[:10], "%Y-%m-%d").date()
+            elif hasattr(earnings_date, "date"):
+                earnings_date = earnings_date.date()
+            days_to_earnings = (earnings_date - datetime.today().date()).days
+            if 0 <= days_to_earnings <= 7:
+                return True
+    except Exception:
+        pass
+    return False
+
+def run_scan(tickers, atr_mult, filter_earnings):
     candidates = []
     for sym in tickers:
         try:
-            df = yf.Ticker(sym).history(period="6mo", interval="1d")
+            t_obj = yf.Ticker(sym)
+            if filter_earnings and check_earnings_risk(t_obj):
+                continue
+
+            df = t_obj.history(period="6mo", interval="1d")
             if df.empty or len(df) < 30:
                 continue
+
             close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
 
-            # 計算均線與指標
             ma20 = close.rolling(20).mean()
             std20 = close.rolling(20).std()
             bb_upper = ma20 + (2 * std20)
             bb_lower = ma20 - (2 * std20)
 
-            # 動量均線 (EMA 8 與 EMA 21)
             ema8 = close.ewm(span=8, adjust=False).mean()
             ema21 = close.ewm(span=21, adjust=False).mean()
 
@@ -155,20 +140,11 @@ def run_scan(tickers, atr_mult):
             curr_ema8 = float(ema8.iloc[-1])
             curr_ema21 = float(ema21.iloc[-1])
 
-            # ---------------- 穩定性核心邏輯 (EMA動量 + 0.5% 容忍緩衝帶) ----------------
-            # 多頭：EMA8 >= EMA21 且 現價未大幅跌破 20MA (容許 0.5% 邊界緩衝)
             is_bullish = (curr_ema8 >= curr_ema21) and (curr_close >= curr_ma20 * 0.995)
-            # 空頭：EMA8 < EMA21 且 現價未大幅突破 20MA (容許 0.5% 邊界緩衝)
             is_bearish = (curr_ema8 < curr_ema21) and (curr_close <= curr_ma20 * 1.005)
 
             if not is_bullish and not is_bearish:
                 continue
-
-            direction_label = "多頭 (CALL)" if is_bullish else "空頭 (PUT)"
-
-            vol_ma20 = float(vol.rolling(20).mean().iloc[-1])
-            curr_vol = float(vol.iloc[-1])
-            vol_ratio = round(curr_vol / vol_ma20, 2) if vol_ma20 > 0 else 1.0
 
             bb_w = bb_upper.iloc[-1] - bb_lower.iloc[-1]
             kc_w = kc_upper.iloc[-1] - kc_lower.iloc[-1]
@@ -177,11 +153,10 @@ def run_scan(tickers, atr_mult):
             if recent_squeeze or comp_ratio < 1.05:
                 candidates.append({
                     "Symbol": sym,
-                    "Direction": direction_label,
+                    "Direction": "多頭 (CALL)" if is_bullish else "空頭 (PUT)",
                     "Price": round(curr_close, 2),
                     "20MA": round(curr_ma20, 2),
                     "EMA8/21": "多頭排列" if is_bullish else "空頭排列",
-                    "Vol_Ratio": vol_ratio,
                     "壓縮比率": comp_ratio,
                     "Squeeze現狀": bool(is_squeezing.iloc[-1]),
                 })
@@ -189,11 +164,10 @@ def run_scan(tickers, atr_mult):
             continue
 
     if not candidates:
-        return pd.DataFrame(columns=["Symbol", "Direction", "Price", "20MA", "EMA8/21", "Vol_Ratio", "壓縮比率", "Squeeze現狀"])
-    
+        return pd.DataFrame(columns=["Symbol", "Direction", "Price", "20MA", "EMA8/21", "壓縮比率", "Squeeze現狀"])
     return pd.DataFrame(candidates)
 
-def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr):
+def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr, check_liq):
     columns_list = [
         "標的", "方向", "現價", "到期日", "組合策略", "買入腿 (Long)",
         "賣出腿 (Short)", "淨成本 ($)", "最大獲利 ($)", "盈虧比",
@@ -201,7 +175,7 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
     ]
     if candidates_df.empty:
         return pd.DataFrame(columns=columns_list)
-        
+
     today = datetime.today()
     spreads = []
 
@@ -224,7 +198,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
 
             chain = ticker.option_chain(target_exp)
 
-            # ---------------- 多頭 (Bull Call Spread) ----------------
             if "CALL" in direction:
                 calls = chain.calls.copy()
                 if calls.empty:
@@ -242,6 +215,14 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 s_leg = s_valid.iloc[0]
 
+                if check_liq:
+                    b_bid, b_ask = b_leg["bid"], b_leg["ask"]
+                    s_bid, s_ask = s_leg["bid"], s_leg["ask"]
+                    if b_ask <= 0 or s_bid <= 0:
+                        continue
+                    if (b_ask - b_bid) > 0.40 or (s_ask - s_bid) > 0.40:
+                        continue
+
                 b_p = b_leg["ask"] if b_leg["ask"] > 0 else b_leg["lastPrice"]
                 s_p = s_leg["bid"] if s_leg["bid"] > 0 else (s_leg["lastPrice"] if s_leg["lastPrice"] < b_p else 0.0)
 
@@ -252,7 +233,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                 if max_profit <= 0:
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
-
                 if rr < min_rr:
                     continue
 
@@ -279,8 +259,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     "Cost_Num": cost,
                     "RR_Num": rr,
                 })
-
-            # ---------------- 空頭 (Bear Put Spread) ----------------
             else:
                 puts = chain.puts.copy()
                 if puts.empty:
@@ -298,6 +276,14 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                     continue
                 s_leg = s_valid.iloc[-1]
 
+                if check_liq:
+                    b_bid, b_ask = b_leg["bid"], b_leg["ask"]
+                    s_bid, s_ask = s_leg["bid"], s_leg["ask"]
+                    if b_ask <= 0 or s_bid <= 0:
+                        continue
+                    if (b_ask - b_bid) > 0.40 or (s_ask - s_bid) > 0.40:
+                        continue
+
                 b_p = b_leg["ask"] if b_leg["ask"] > 0 else b_leg["lastPrice"]
                 s_p = s_leg["bid"] if s_leg["bid"] > 0 else (s_leg["lastPrice"] if s_leg["lastPrice"] < b_p else 0.0)
 
@@ -308,7 +294,6 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
                 if max_profit <= 0:
                     continue
                 rr = round(max_profit / cost, 2) if cost > 0 else 0
-
                 if rr < min_rr:
                     continue
 
@@ -340,27 +325,21 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
 
     if not spreads:
         return pd.DataFrame(columns=columns_list)
+    return pd.DataFrame(spreads).sort_values(by="RR_Num", ascending=False)
 
-    df_out = pd.DataFrame(spreads)
-    df_out = df_out.sort_values(by="RR_Num", ascending=False)
-    return df_out
-
-# 執行按鈕
 if st.button("🚀 開始執行全市場量化掃描"):
-    with st.spinner("正在掃描市場 K 線與期權鏈數據..."):
-        cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier)
+    with st.spinner("正在執行技術形態、財報日過濾與流動性深度驗證..."):
+        cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier, avoid_earnings)
         st.session_state["cand_df"] = cand_df
         st.session_state["spread_df"] = get_options_spreads(
-            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio
+            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio, filter_liquidity
         )
 
 if "cand_df" in st.session_state:
     cand_df = st.session_state["cand_df"]
     spread_df = st.session_state["spread_df"]
 
-    squeeze_count = 0
-    if not cand_df.empty and "Squeeze現狀" in cand_df.columns:
-        squeeze_count = len(cand_df[cand_df["Squeeze現狀"]])
+    squeeze_count = len(cand_df[cand_df["Squeeze現狀"]]) if not cand_df.empty and "Squeeze現狀" in cand_df.columns else 0
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("掃描標的池", f"{len(DEFAULT_WATCHLIST)} 隻")
@@ -368,17 +347,15 @@ if "cand_df" in st.session_state:
     col3.metric("高賠率期權組合", f"{len(spread_df)} 組")
     col4.metric(f"預算篩選 (< ${max_budget})", f"{max_budget} 美元")
 
-    st.markdown(f"### 🎯 精選高性價比期權組合 (已過濾 RR ≥ 1 : {min_rr_ratio})")
+    st.markdown(f"### 🎯 精選高性價比期權組合 (已過濾 RR ≥ 1 : {min_rr_ratio}，無財報風險與寬點差)")
     if not spread_df.empty and "Cost_Num" in spread_df.columns:
-        filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget].drop(
-            columns=["Cost_Num", "RR_Num"]
-        )
+        filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget].drop(columns=["Cost_Num", "RR_Num"])
         if not filtered_spreads.empty:
             st.dataframe(filtered_spreads, use_container_width=True, hide_index=True)
         else:
-            st.warning(f"在單注預算 ${max_budget} 內，暫無符合 RR ≥ 1:{min_rr_ratio} 的期權組合。")
+            st.warning(f"在單注預算 ${max_budget} 內，暫無符合條件且點差合規的期權組合。")
     else:
-        st.warning(f"未找到符合盈虧比 ≥ 1:{min_rr_ratio} 的期權組合。")
+        st.warning(f"未找到符合要求、點差合規且避開財報的期權組合。")
 
     st.markdown("### 📋 技術形態候選池")
     if not cand_df.empty:
@@ -386,7 +363,6 @@ if "cand_df" in st.session_state:
     else:
         st.info("當前暫無符合條件的技術形態標的。")
 
-# 頁尾版本標記
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
