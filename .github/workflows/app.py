@@ -12,9 +12,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.6.2"
+APP_VERSION = "v3.6.4"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Default Budget Set to $800 + Bark Push + 5-Min Cruise"
+BUILD_TAG = "Bark Push Expiration Date Included + Anti-FOMO + 5-Min Cruise"
 LOG_FILE = "trade_log.csv"
 AUTO_SCAN_INTERVAL_SEC = 300  # 固定 5 分鐘巡航 (300 秒)
 
@@ -62,7 +62,6 @@ st.sidebar.markdown("### ⏱️ 定時自動巡航")
 auto_scan_enabled = st.sidebar.checkbox("開啟 5 分鐘定時自動巡航", value=True)
 
 dte_min, dte_max = st.sidebar.slider("到期日範圍 (DTE)", 14, 60, (20, 45))
-# 🔥 預設預算調整為 $800
 max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 5000, 800, 50)
 min_rr_ratio = st.sidebar.slider("🔥 價差最低盈虧比 (1 : X)", 1.0, 3.0, 1.3, 0.1)
 
@@ -73,9 +72,12 @@ min_notional_usd = st.sidebar.number_input(
     "大單權利金總體量 ($)", 10000, 1000000, 150000, 25000
 )
 
-st.sidebar.markdown("### 🛡️ 主力動能硬防護 (防陰跌砸盤)")
+st.sidebar.markdown("### 🛡️ 主力動能硬防護 (防陰跌砸盤 & 防接火棒)")
 min_contract_gain_pct = st.sidebar.slider(
     "🔥 合約當日最低漲幅 (%)", 0, 50, 10, 5
+)
+max_contract_gain_pct = st.sidebar.slider(
+    "🛑 合約當日最高漲幅上限 (%) [防追高]", 100, 500, 150, 25
 )
 avoid_earnings = st.sidebar.checkbox(
     "自動剔除 7 天內即將公布財報標的", value=True
@@ -94,7 +96,7 @@ with col_title:
       unsafe_allow_html=True,
   )
   st.caption(
-      "預設預算 $800 · Bark 即時推送 · 全到期日穿透 · 5分鐘固定巡航 · 自動記錄 CSV"
+      "Bark 通知帶精確到期日 · 漲幅 10%~150% 防護 · 跨到期日穿透 · 5分鐘固定巡航"
   )
 with col_ver:
   st.markdown(
@@ -198,7 +200,7 @@ SECTOR_MAP = {
     "GS": "傳統金融",
     "BAC": "傳統金融",
     "XOM": "傳統能源",
-    "CVX": "推統能源",
+    "CVX": "傳統能源",
     "OXY": "傳統能源",
     "LLY": "醫藥醫療",
     "UNH": "醫藥醫療",
@@ -263,6 +265,7 @@ def scan_pure_flow(
     avoid_earn,
     min_notional,
     min_gain_pct,
+    max_gain_pct,
 ):
   today = datetime.today()
   uoa_alerts = []
@@ -351,11 +354,19 @@ def scan_pure_flow(
                   else 0.0
               )
 
+              # 嚴密風控判定（上下限雙重攔截）
               if c_pct_change < min_gain_pct:
                 rec_badge = "🔴 嚴禁買入"
                 reason = (
                     f"合約動能失真 ({round(c_pct_change, 1)}%)，未達最低暴增漲幅"
                     f" (+{min_gain_pct}%)，屬陰跌拋售"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              elif c_pct_change > max_gain_pct:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"漲幅嚴重透支 (+{round(c_pct_change, 1)}%)，已超上限"
+                    f" (+{max_gain_pct}%)，屬高位派發接火棒"
                 )
                 tp_target, sl_target = "不適用", "不適用"
               elif not is_buyer_initiated:
@@ -490,11 +501,19 @@ def scan_pure_flow(
                   else 0.0
               )
 
+              # 嚴密風控判定（上下限雙重攔截）
               if p_pct_change < min_gain_pct:
                 rec_badge = "🔴 嚴禁買入"
                 reason = (
                     f"合約動能失真 ({round(p_pct_change, 1)}%)，未達最低暴增漲幅"
                     f" (+{min_gain_pct}%)，屬陰跌出貨"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              elif p_pct_change > max_gain_pct:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"漲幅嚴重透支 (+{round(p_pct_change, 1)}%)，已超上限"
+                    f" (+{max_gain_pct}%)，屬超跌反彈陷阱"
                 )
                 tp_target, sl_target = "不適用", "不適用"
               elif not is_buyer_initiated:
@@ -604,7 +623,7 @@ def scan_pure_flow(
 
 
 # ==========================================
-# 核心掃描觸發器 (修復換行語法)
+# 核心掃描觸發器 (Bark 包含到期日)
 # ==========================================
 def run_scan():
   with st.spinner("正在跨週期穿透核心資產期權鏈 (涵蓋9月與10月大單)..."):
@@ -619,6 +638,7 @@ def run_scan():
         avoid_earnings,
         min_notional_usd,
         min_contract_gain_pct,
+        max_contract_gain_pct,
     )
     st.session_state["pure_uoa_df"] = uoa_df
     st.session_state["pure_spread_df"] = spread_df
@@ -633,16 +653,26 @@ def run_scan():
             icon="📝",
         )
 
-        # 📱 Bark 即時通知推送 (安全單行格式，絕不語法中斷)
+        # 📱 Bark 即時通知推送 (包含完整到期日與天數)
         if bark_device_key:
           for _, row in rec_buys.iterrows():
-            title = f"🟢 主力買入信號: {row['標的代號']} {row['異動行使價']}"
-            part1 = (
+            # 取到期日簡寫放入標題，例如 2026-09-25 轉為 09/25
+            raw_exp = row["到期日"].split(" ")[0]
+            short_exp = raw_exp[5:].replace("-", "/")
+
+            title = (
+                f"🟢 主力買入: {row['標的代號']} {short_exp}"
+                f" {row['異動行使價']}"
+            )
+            part1 = f"到期日: {row['到期日']}"
+            part2 = (
                 f"成本: ${row['單張成本 ($)']} | 漲幅:"
                 f" {row['合約當日漲跌']}"
             )
-            part2 = f"大單體量: {row['大單成交額 ($)']}"
-            part3 = f"建議限價: {row['建議買入限價']}"
+            part3 = (
+                f"建議限價: {row['建議買入限價']} | 體量:"
+                f" {row['大單成交額 ($)']}"
+            )
             part4 = (
                 f"止盈: {row['止盈目標 (+60%)']} | 止損:"
                 f" {row['止損底線 (-35%)']}"
@@ -722,7 +752,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Bark Push Architecture</div>",
+    f" ({BUILD_DATE}) · Bark Expiration Hardened</div>",
     unsafe_allow_html=True,
 )
 
