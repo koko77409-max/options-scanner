@@ -10,11 +10,11 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.4.4"
+APP_VERSION = "v3.5.0"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Fixed Delayed Bid/Ask Misclassification + 5-Min Hardcoded Cruise"
+BUILD_TAG = "Multi-Expiration (Sept+Oct) + Anti-429 Rate Pacing + Auto-Cruise"
 LOG_FILE = "trade_log.csv"
-AUTO_SCAN_INTERVAL_SEC = 300  # 固定寫死 5 分鐘 (300 秒)
+AUTO_SCAN_INTERVAL_SEC = 300  # 固定 5 分鐘巡航 (300 秒)
 
 warnings.filterwarnings("ignore")
 
@@ -81,7 +81,7 @@ with col_title:
       f" <span class='version-badge'>{APP_VERSION}</span>",
       unsafe_allow_html=True,
   )
-  st.caption("抗數據延遲誤殺 · 5分鐘固定巡航 · 自動寫入 CSV 紀錄 · OTM 15% 容限")
+  st.caption("全到期日穿透 (9月+10月) · 智能防 429 錯峰 · 5分鐘固定巡航 · 自動記錄 CSV")
 with col_ver:
   st.markdown(
       f"<div style='text-align:right; font-size:12px;"
@@ -217,6 +217,9 @@ def scan_pure_flow(
 
   for sym in tickers:
     try:
+      # 智能防 429 錯峰請求延遲 (0.12 秒)
+      time.sleep(0.12)
+
       t_obj = yf.Ticker(sym)
       if avoid_earn and check_earnings_risk(t_obj):
         continue
@@ -237,286 +240,300 @@ def scan_pure_flow(
       if not expirations:
         continue
 
-      target_exp, target_dte = None, None
+      # 🔥 抓取符合 DTE 範圍內的所有主要到期日 (同時涵蓋 9 月底與 10 月中旬)
+      target_dates = []
       for exp in expirations:
         dte = (datetime.strptime(exp, "%Y-%m-%d") - today).days
         if d_min <= dte <= d_max:
-          target_exp, target_dte = exp, dte
-          break
-      if not target_exp:
+          target_dates.append((exp, dte))
+          if len(target_dates) >= 2:  # 抓取最近的 2 個主流到期週
+            break
+
+      if not target_dates:
         continue
 
-      chain = t_obj.option_chain(target_exp)
+      for target_exp, target_dte in target_dates:
+        try:
+          chain = t_obj.option_chain(target_exp)
+        except Exception:
+          continue
 
-      # ---------------- 1. 看漲 Call 掃描 ----------------
-      calls_df = chain.calls.copy()
-      if not calls_df.empty:
-        for _, c_row in calls_df.iterrows():
-          c_vol = c_row.get("volume", 0)
-          c_oi = c_row.get("openInterest", 0)
-          if pd.isna(c_vol) or pd.isna(c_oi) or c_oi == 0:
-            continue
-          c_ratio = round(float(c_vol) / float(c_oi), 2)
+        # ---------------- 1. 看漲 Call 掃描 ----------------
+        calls_df = chain.calls.copy()
+        if not calls_df.empty:
+          for _, c_row in calls_df.iterrows():
+            c_vol = c_row.get("volume", 0)
+            c_oi = c_row.get("openInterest", 0)
+            if pd.isna(c_vol) or pd.isna(c_oi) or c_oi == 0:
+              continue
+            c_ratio = round(float(c_vol) / float(c_oi), 2)
 
-          if c_vol >= min_uoa_v and c_ratio >= min_uoa_r:
-            c_strike = float(c_row.get("strike", 0))
-            c_price = float(c_row.get("lastPrice", 0.0))
-            c_bid = float(c_row.get("bid", 0.0))
-            c_ask = float(c_row.get("ask", 0.0))
-            c_pct_change = float(c_row.get("percentChange", 0.0))
-            if pd.isna(c_pct_change):
-              c_pct_change = 0.0
+            if c_vol >= min_uoa_v and c_ratio >= min_uoa_r:
+              c_strike = float(c_row.get("strike", 0))
+              c_price = float(c_row.get("lastPrice", 0.0))
+              c_bid = float(c_row.get("bid", 0.0))
+              c_ask = float(c_row.get("ask", 0.0))
+              c_pct_change = float(c_row.get("percentChange", 0.0))
+              if pd.isna(c_pct_change):
+                c_pct_change = 0.0
 
-            cost_total = round(c_price * 100, 1)
-            notional_usd = round(c_price * c_vol * 100, 1)
+              cost_total = round(c_price * 100, 1)
+              notional_usd = round(c_price * c_vol * 100, 1)
 
-            mid_price = (
-                (c_bid + c_ask) / 2.0 if (c_bid > 0 and c_ask > 0) else c_price
-            )
-            # 🔥 抗延遲買盤判定：漲幅達標直接確認為主動推升，不再被過期 Bid/Ask 誤殺
-            is_buyer_initiated = (
-                True
-                if c_pct_change >= min_gain_pct
-                else (
-                    (c_price >= mid_price * 0.98) if mid_price > 0 else True
+              mid_price = (
+                  (c_bid + c_ask) / 2.0
+                  if (c_bid > 0 and c_ask > 0)
+                  else c_price
+              )
+              # 抗盤口延遲：大漲直接判定為多頭推升
+              is_buyer_initiated = (
+                  True
+                  if c_pct_change >= min_gain_pct
+                  else (
+                      (c_price >= mid_price * 0.98) if mid_price > 0 else True
+                  )
+              )
+              otm_pct = (
+                  (c_strike - curr_price) / curr_price
+                  if curr_price > 0
+                  else 0.0
+              )
+
+              if c_pct_change < min_gain_pct:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"合約動能失真 ({round(c_pct_change, 1)}%)，未達最低暴增漲幅"
+                    f" (+{min_gain_pct}%)，屬陰跌拋售"
                 )
-            )
-            otm_pct = (
-                (c_strike - curr_price) / curr_price if curr_price > 0 else 0.0
-            )
-
-            if c_pct_change < min_gain_pct:
-              rec_badge = "🔴 嚴禁買入"
-              reason = (
-                  f"合約動能失真 ({round(c_pct_change, 1)}%)，未達最低暴增漲幅"
-                  f" (+{min_gain_pct}%)，屬陰跌拋售"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif not is_buyer_initiated:
-              rec_badge = "🔴 嚴禁買入"
-              reason = (
-                  "主力主動砸盤平倉 (打在 Bid 價附近)，非買盤進場"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif notional_usd < min_notional:
-              rec_badge = "⚠️ 暫不推薦"
-              reason = (
-                  f"大單總額 ${int(notional_usd):,} 未達主力資金門檻"
-                  f" (${int(min_notional):,})"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif otm_pct > 0.15:
-              rec_badge = "🔴 嚴禁買入"
-              reason = (
-                  f"深度虛值 (+{round(otm_pct*100, 1)}%)，彩票陷阱 /"
-                  " 機構賣出腿"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif cost_total > budget:
-              rec_badge = "⚠️ 暫不推薦"
-              reason = f"單手成本 ${cost_total} 超出單注預算 (${budget})"
-              tp_target, sl_target = "不適用", "不適用"
-            else:
-              rec_badge = "🟢 建議買入"
-              reason = (
-                  f"主動追價掃盤 (漲幅 +{round(c_pct_change, 1)}%)，總額"
-                  f" ${int(notional_usd):,}，主力動能極強"
-              )
-              tp_target = (
-                  f"${round(c_price * 1.6, 2)} ~ ${round(c_price * 1.8, 2)}"
-              )
-              sl_target = f"${round(c_price * 0.65, 2)}"
-
-              s_cands = calls_df[calls_df["strike"] > c_strike]
-              if not s_cands.empty:
-                s_leg = s_cands.iloc[0]
-                b_p = c_price
-                s_p = (
-                    float(s_leg.get("bid", 0))
-                    if float(s_leg.get("bid", 0)) > 0
-                    else float(s_leg.get("lastPrice", 0))
+                tp_target, sl_target = "不適用", "不適用"
+              elif not is_buyer_initiated:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    "主力主動砸盤平倉 (打在 Bid 價附近)，非買盤進場"
                 )
-                net_debit = max(0.05, round(b_p - s_p, 2))
-                cost = round(net_debit * 100, 2)
-                spread_width = float(s_leg["strike"]) - c_strike
-                max_profit = round((spread_width * 100) - cost, 2)
-                rr = round(max_profit / cost, 2) if cost > 0 else 0
-
-                if rr >= min_rr and cost <= budget:
-                  spread_recommendations.append({
-                      "標的代號": sym,
-                      "板塊": SECTOR_MAP.get(sym, "其他"),
-                      "方向": "🟢 跟隨做多 (Call)",
-                      "正股現價": f"${round(curr_price, 2)}",
-                      "到期日": f"{target_exp} ({target_dte}天)",
-                      "策略": "Bull Call Spread",
-                      "【買入行使價】": f"${c_strike} Call",
-                      "【賣出行使價】": f"${s_leg['strike']} Call",
-                      "開倉限價 (單價)": f"${net_debit}",
-                      "單手成本 ($)": f"${cost}",
-                      "目標止盈限價": (
-                          f"${round(net_debit + (max_profit*0.5/100), 2)} ~"
-                          f" ${round(net_debit + (max_profit*0.7/100), 2)}"
-                      ),
-                      "剛性止損價位": f"${round(net_debit * 0.6, 2)} (-40%)",
-                      "盈虧比": f"1 : {rr}",
-                      "Cost_Num": cost,
-                      "RR_Num": rr,
-                  })
-
-            uoa_alerts.append({
-                "推薦評級": rec_badge,
-                "標的代號": sym,
-                "方向類型": "🟢 看漲 (Call 異動)",
-                "合約當日漲跌": (
-                    f"{'+' if c_pct_change>0 else ''}{round(c_pct_change, 1)}%"
-                ),
-                "到期日": f"{target_exp} ({target_dte}天)",
-                "異動行使價": f"${c_strike} Call",
-                "單張成本 ($)": f"${cost_total}",
-                "大單成交額 ($)": f"${int(notional_usd):,}",
-                "建議買入限價": f"${c_price}",
-                "止盈目標 (+60%)": tp_target,
-                "止損底線 (-35%)": sl_target,
-                "成交量 / OI (倍數)": (
-                    f"{int(c_vol)} / {int(c_oi)} ({c_ratio}x)"
-                ),
-                "系統判定理由": reason,
-            })
-
-      # ---------------- 2. 看跌 Put 掃描 ----------------
-      puts_df = chain.puts.copy()
-      if not puts_df.empty:
-        for _, p_row in puts_df.iterrows():
-          p_vol = p_row.get("volume", 0)
-          p_oi = p_row.get("openInterest", 0)
-          if pd.isna(p_vol) or pd.isna(p_oi) or p_oi == 0:
-            continue
-          p_ratio = round(float(p_vol) / float(p_oi), 2)
-
-          if p_vol >= min_uoa_v and p_ratio >= min_uoa_r:
-            p_strike = float(p_row.get("strike", 0))
-            p_price = float(p_row.get("lastPrice", 0.0))
-            p_bid = float(p_row.get("bid", 0.0))
-            p_ask = float(p_row.get("ask", 0.0))
-            p_pct_change = float(p_row.get("percentChange", 0.0))
-            if pd.isna(p_pct_change):
-              p_pct_change = 0.0
-
-            cost_total = round(p_price * 100, 1)
-            notional_usd = round(p_price * p_vol * 100, 1)
-
-            mid_price = (
-                (p_bid + p_ask) / 2.0 if (p_bid > 0 and p_ask > 0) else p_price
-            )
-            # 🔥 抗延遲買盤判定：做空合約漲幅達標直接確認為買入 Put
-            is_buyer_initiated = (
-                True
-                if p_pct_change >= min_gain_pct
-                else (
-                    (p_price >= mid_price * 0.98) if mid_price > 0 else True
+                tp_target, sl_target = "不適用", "不適用"
+              elif notional_usd < min_notional:
+                rec_badge = "⚠️ 暫不推薦"
+                reason = (
+                    f"大單總額 ${int(notional_usd):,} 未達主力資金門檻"
+                    f" (${int(min_notional):,})"
                 )
-            )
-            otm_pct = (
-                (curr_price - p_strike) / curr_price if curr_price > 0 else 0.0
-            )
-
-            if p_pct_change < min_gain_pct:
-              rec_badge = "🔴 嚴禁買入"
-              reason = (
-                  f"合約動能失真 ({round(p_pct_change, 1)}%)，未達最低暴增漲幅"
-                  f" (+{min_gain_pct}%)，屬陰跌出貨"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif not is_buyer_initiated:
-              rec_badge = "🔴 嚴禁買入"
-              reason = "主力平倉看跌期權 (打在 Bid 價)，非做空下注"
-              tp_target, sl_target = "不適用", "不適用"
-            elif notional_usd < min_notional:
-              rec_badge = "⚠️ 暫不推薦"
-              reason = (
-                  f"大單總額 ${int(notional_usd):,} 未達主力資金門檻"
-                  f" (${int(min_notional):,})"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif otm_pct > 0.15:
-              rec_badge = "🔴 嚴禁買入"
-              reason = (
-                  f"深度虛值 Put (-{round(otm_pct*100, 1)}%)，彩票對沖 /"
-                  " 機構賣出腿"
-              )
-              tp_target, sl_target = "不適用", "不適用"
-            elif cost_total > budget:
-              rec_badge = "⚠️ 暫不推薦"
-              reason = f"單手成本 ${cost_total} 超出單注預算 (${budget})"
-              tp_target, sl_target = "不適用", "不適用"
-            else:
-              rec_badge = "🟢 建議買入"
-              reason = (
-                  f"主動追價做空 (漲幅 +{round(p_pct_change, 1)}%)，總額"
-                  f" ${int(notional_usd):,}，主力爆量押注大跌"
-              )
-              tp_target = (
-                  f"${round(p_price * 1.6, 2)} ~ ${round(p_price * 1.8, 2)}"
-              )
-              sl_target = f"${round(p_price * 0.65, 2)}"
-
-              s_cands = puts_df[puts_df["strike"] < p_strike]
-              if not s_cands.empty:
-                s_leg = s_cands.iloc[-1]
-                b_p = p_price
-                s_p = (
-                    float(s_leg.get("bid", 0))
-                    if float(s_leg.get("bid", 0)) > 0
-                    else float(s_leg.get("lastPrice", 0))
+                tp_target, sl_target = "不適用", "不適用"
+              elif otm_pct > 0.15:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"深度虛值 (+{round(otm_pct*100, 1)}%)，彩票陷阱 /"
+                    " 機構賣出腿"
                 )
-                net_debit = max(0.05, round(b_p - s_p, 2))
-                cost = round(net_debit * 100, 2)
-                spread_width = p_strike - float(s_leg["strike"])
-                max_profit = round((spread_width * 100) - cost, 2)
-                rr = round(max_profit / cost, 2) if cost > 0 else 0
+                tp_target, sl_target = "不適用", "不適用"
+              elif cost_total > budget:
+                rec_badge = "⚠️ 暫不推薦"
+                reason = (
+                    f"單手成本 ${cost_total} 超出單注預算 (${budget})"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              else:
+                rec_badge = "🟢 建議買入"
+                reason = (
+                    f"主動追價掃盤 (漲幅 +{round(c_pct_change, 1)}%)，總額"
+                    f" ${int(notional_usd):,}，主力動能極強"
+                )
+                tp_target = f"${round(c_price * 1.6, 2)} ~ ${round(c_price * 1.8, 2)}"
+                sl_target = f"${round(c_price * 0.65, 2)}"
 
-                if rr >= min_rr and cost <= budget:
-                  spread_recommendations.append({
-                      "標的代號": sym,
-                      "板塊": SECTOR_MAP.get(sym, "其他"),
-                      "方向": "🔴 跟隨做空 (Put)",
-                      "正股現價": f"${round(curr_price, 2)}",
-                      "到期日": f"{target_exp} ({target_dte}天)",
-                      "策略": "Bear Put Spread",
-                      "【買入行使價】": f"${p_strike} Put",
-                      "【賣出行使價】": f"${s_leg['strike']} Put",
-                      "開倉限價 (單價)": f"${net_debit}",
-                      "單手成本 ($)": f"${cost}",
-                      "目標止盈限價": (
-                          f"${round(net_debit + (max_profit*0.5/100), 2)} ~"
-                          f" ${round(net_debit + (max_profit*0.7/100), 2)}"
-                      ),
-                      "剛性止損價位": f"${round(net_debit * 0.6, 2)} (-40%)",
-                      "盈虧比": f"1 : {rr}",
-                      "Cost_Num": cost,
-                      "RR_Num": rr,
-                  })
+                s_cands = calls_df[calls_df["strike"] > c_strike]
+                if not s_cands.empty:
+                  s_leg = s_cands.iloc[0]
+                  b_p = c_price
+                  s_p = (
+                      float(s_leg.get("bid", 0))
+                      if float(s_leg.get("bid", 0)) > 0
+                      else float(s_leg.get("lastPrice", 0))
+                  )
+                  net_debit = max(0.05, round(b_p - s_p, 2))
+                  cost = round(net_debit * 100, 2)
+                  spread_width = float(s_leg["strike"]) - c_strike
+                  max_profit = round((spread_width * 100) - cost, 2)
+                  rr = round(max_profit / cost, 2) if cost > 0 else 0
 
-            uoa_alerts.append({
-                "推薦評級": rec_badge,
-                "標的代號": sym,
-                "方向類型": "🔴 做空 (Put 異動)",
-                "合約當日漲跌": (
-                    f"{'+' if p_pct_change>0 else ''}{round(p_pct_change, 1)}%"
-                ),
-                "到期日": f"{target_exp} ({target_dte}天)",
-                "異動行使價": f"${p_strike} Put",
-                "單張成本 ($)": f"${cost_total}",
-                "大單成交額 ($)": f"${int(notional_usd):,}",
-                "建議買入限價": f"${p_price}",
-                "止盈目標 (+60%)": tp_target,
-                "止損底線 (-35%)": sl_target,
-                "成交量 / OI (倍數)": (
-                    f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)"
-                ),
-                "系統判定理由": reason,
-            })
+                  if rr >= min_rr and cost <= budget:
+                    spread_recommendations.append({
+                        "標的代號": sym,
+                        "板塊": SECTOR_MAP.get(sym, "其他"),
+                        "方向": "🟢 跟隨做多 (Call)",
+                        "正股現價": f"${round(curr_price, 2)}",
+                        "到期日": f"{target_exp} ({target_dte}天)",
+                        "策略": "Bull Call Spread",
+                        "【買入行使價】": f"${c_strike} Call",
+                        "【賣出行使價】": f"${s_leg['strike']} Call",
+                        "開倉限價 (單價)": f"${net_debit}",
+                        "單手成本 ($)": f"${cost}",
+                        "目標止盈限價": (
+                            f"${round(net_debit + (max_profit*0.5/100), 2)} ~"
+                            f" ${round(net_debit + (max_profit*0.7/100), 2)}"
+                        ),
+                        "剛性止損價位": f"${round(net_debit * 0.6, 2)} (-40%)",
+                        "盈虧比": f"1 : {rr}",
+                        "Cost_Num": cost,
+                        "RR_Num": rr,
+                    })
+
+              uoa_alerts.append({
+                  "推薦評級": rec_badge,
+                  "標的代號": sym,
+                  "方向類型": "🟢 看漲 (Call 異動)",
+                  "合約當日漲跌": (
+                      f"{'+' if c_pct_change>0 else ''}{round(c_pct_change, 1)}%"
+                  ),
+                  "到期日": f"{target_exp} ({target_dte}天)",
+                  "異動行使價": f"${c_strike} Call",
+                  "單張成本 ($)": f"${cost_total}",
+                  "大單成交額 ($)": f"${int(notional_usd):,}",
+                  "建議買入限價": f"${c_price}",
+                  "止盈目標 (+60%)": tp_target,
+                  "止損底線 (-35%)": sl_target,
+                  "成交量 / OI (倍數)": (
+                      f"{int(c_vol)} / {int(c_oi)} ({c_ratio}x)"
+                  ),
+                  "系統判定理由": reason,
+              })
+
+        # ---------------- 2. 看跌 Put 掃描 ----------------
+        puts_df = chain.puts.copy()
+        if not puts_df.empty:
+          for _, p_row in puts_df.iterrows():
+            p_vol = p_row.get("volume", 0)
+            p_oi = p_row.get("openInterest", 0)
+            if pd.isna(p_vol) or pd.isna(p_oi) or p_oi == 0:
+              continue
+            p_ratio = round(float(p_vol) / float(p_oi), 2)
+
+            if p_vol >= min_uoa_v and p_ratio >= min_uoa_r:
+              p_strike = float(p_row.get("strike", 0))
+              p_price = float(p_row.get("lastPrice", 0.0))
+              p_bid = float(p_row.get("bid", 0.0))
+              p_ask = float(p_row.get("ask", 0.0))
+              p_pct_change = float(p_row.get("percentChange", 0.0))
+              if pd.isna(p_pct_change):
+                p_pct_change = 0.0
+
+              cost_total = round(p_price * 100, 1)
+              notional_usd = round(p_price * p_vol * 100, 1)
+
+              mid_price = (
+                  (p_bid + p_ask) / 2.0
+                  if (p_bid > 0 and p_ask > 0)
+                  else p_price
+              )
+              is_buyer_initiated = (
+                  True
+                  if p_pct_change >= min_gain_pct
+                  else (
+                      (p_price >= mid_price * 0.98) if mid_price > 0 else True
+                  )
+              )
+              otm_pct = (
+                  (curr_price - p_strike) / curr_price
+                  if curr_price > 0
+                  else 0.0
+              )
+
+              if p_pct_change < min_gain_pct:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"合約動能失真 ({round(p_pct_change, 1)}%)，未達最低暴增漲幅"
+                    f" (+{min_gain_pct}%)，屬陰跌出貨"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              elif not is_buyer_initiated:
+                rec_badge = "🔴 嚴禁買入"
+                reason = "主力平倉看跌期權 (打在 Bid 價)，非做空下注"
+                tp_target, sl_target = "不適用", "不適用"
+              elif notional_usd < min_notional:
+                rec_badge = "⚠️ 暫不推薦"
+                reason = (
+                    f"大單總額 ${int(notional_usd):,} 未達主力資金門檻"
+                    f" (${int(min_notional):,})"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              elif otm_pct > 0.15:
+                rec_badge = "🔴 嚴禁買入"
+                reason = (
+                    f"深度虛值 Put (-{round(otm_pct*100, 1)}%)，彩票對沖 /"
+                    " 機構賣出腿"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              elif cost_total > budget:
+                rec_badge = "⚠️ 暫不推薦"
+                reason = (
+                    f"單手成本 ${cost_total} 超出單注預算 (${budget})"
+                )
+                tp_target, sl_target = "不適用", "不適用"
+              else:
+                rec_badge = "🟢 建議買入"
+                reason = (
+                    f"主動追價做空 (漲幅 +{round(p_pct_change, 1)}%)，總額"
+                    f" ${int(notional_usd):,}，主力爆量押注大跌"
+                )
+                tp_target = f"${round(p_price * 1.6, 2)} ~ ${round(p_price * 1.8, 2)}"
+                sl_target = f"${round(p_price * 0.65, 2)}"
+
+                s_cands = puts_df[puts_df["strike"] < p_strike]
+                if not s_cands.empty:
+                  s_leg = s_cands.iloc[-1]
+                  b_p = p_price
+                  s_p = (
+                      float(s_leg.get("bid", 0))
+                      if float(s_leg.get("bid", 0)) > 0
+                      else float(s_leg.get("lastPrice", 0))
+                  )
+                  net_debit = max(0.05, round(b_p - s_p, 2))
+                  cost = round(net_debit * 100, 2)
+                  spread_width = p_strike - float(s_leg["strike"])
+                  max_profit = round((spread_width * 100) - cost, 2)
+                  rr = round(max_profit / cost, 2) if cost > 0 else 0
+
+                  if rr >= min_rr and cost <= budget:
+                    spread_recommendations.append({
+                        "標的代號": sym,
+                        "板塊": SECTOR_MAP.get(sym, "其他"),
+                        "方向": "🔴 跟隨做空 (Put)",
+                        "正股現價": f"${round(curr_price, 2)}",
+                        "到期日": f"{target_exp} ({target_dte}天)",
+                        "策略": "Bear Put Spread",
+                        "【買入行使價】": f"${p_strike} Put",
+                        "【賣出行使價】": f"${s_leg['strike']} Put",
+                        "開倉限價 (單價)": f"${net_debit}",
+                        "單手成本 ($)": f"${cost}",
+                        "目標止盈限價": (
+                            f"${round(net_debit + (max_profit*0.5/100), 2)} ~"
+                            f" ${round(net_debit + (max_profit*0.7/100), 2)}"
+                        ),
+                        "剛性止損價位": f"${round(net_debit * 0.6, 2)} (-40%)",
+                        "盈虧比": f"1 : {rr}",
+                        "Cost_Num": cost,
+                        "RR_Num": rr,
+                    })
+
+              uoa_alerts.append({
+                  "推薦評級": rec_badge,
+                  "標的代號": sym,
+                  "方向類型": "🔴 做空 (Put 異動)",
+                  "合約當日漲跌": (
+                      f"{'+' if p_pct_change>0 else ''}{round(p_pct_change, 1)}%"
+                  ),
+                  "到期日": f"{target_exp} ({target_dte}天)",
+                  "異動行使價": f"${p_strike} Put",
+                  "單張成本 ($)": f"${cost_total}",
+                  "大單成交額 ($)": f"${int(notional_usd):,}",
+                  "建議買入限價": f"${p_price}",
+                  "止盈目標 (+60%)": tp_target,
+                  "止損底線 (-35%)": sl_target,
+                  "成交量 / OI (倍數)": (
+                      f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)"
+                  ),
+                  "系統判定理由": reason,
+              })
     except Exception:
       continue
 
@@ -538,9 +555,7 @@ def scan_pure_flow(
 # 核心掃描觸發器
 # ==========================================
 def run_scan():
-  with st.spinner(
-      "正在逐一穿透核心資產期權鏈，執行動能爆發與大單金額算法過濾..."
-  ):
+  with st.spinner("正在跨週期穿透核心資產期權鏈 (涵蓋9月與10月大單)..."):
     uoa_df, spread_df = scan_pure_flow(
         DEFAULT_WATCHLIST,
         dte_min,
@@ -590,7 +605,7 @@ if "pure_uoa_df" in st.session_state and "pure_spread_df" in st.session_state:
   col2.metric("🚨 資金異動合約", f"{len(uoa_df)} 個")
   col3.metric("🟢 真實主動買盤", f"{rec_count} 個")
 
-  st.markdown("### 🚨 知情主力資金異動雷達 (已過濾陰跌與雜質單)")
+  st.markdown("### 🚨 知情主力資金異動雷達 (跨週期穿透)")
   if not uoa_df.empty:
     st.dataframe(uoa_df, use_container_width=True, hide_index=True)
   else:
@@ -638,7 +653,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Anti-Misclassification Hardened</div>",
+    f" ({BUILD_DATE}) · Fully Hardened Architecture</div>",
     unsafe_allow_html=True,
 )
 
