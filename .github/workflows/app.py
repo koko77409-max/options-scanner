@@ -12,9 +12,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.6.1"
+APP_VERSION = "v3.6.2"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Fixed String Literal Syntax + Bark Push + 5-Min Cruise"
+BUILD_TAG = "Default Budget Set to $800 + Bark Push + 5-Min Cruise"
 LOG_FILE = "trade_log.csv"
 AUTO_SCAN_INTERVAL_SEC = 300  # 固定 5 分鐘巡航 (300 秒)
 
@@ -62,7 +62,8 @@ st.sidebar.markdown("### ⏱️ 定時自動巡航")
 auto_scan_enabled = st.sidebar.checkbox("開啟 5 分鐘定時自動巡航", value=True)
 
 dte_min, dte_max = st.sidebar.slider("到期日範圍 (DTE)", 14, 60, (20, 45))
-max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 2000, 350, 50)
+# 🔥 預設預算調整為 $800
+max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 5000, 800, 50)
 min_rr_ratio = st.sidebar.slider("🔥 價差最低盈虧比 (1 : X)", 1.0, 3.0, 1.3, 0.1)
 
 st.sidebar.markdown("### 🚨 知情資金 (UOA) 爆量門檻")
@@ -93,7 +94,7 @@ with col_title:
       unsafe_allow_html=True,
   )
   st.caption(
-      "Bark 即時推送 · 全到期日穿透 · 智能防 429 錯峰 · 5分鐘固定巡航 · 自動記錄 CSV"
+      "預設預算 $800 · Bark 即時推送 · 全到期日穿透 · 5分鐘固定巡航 · 自動記錄 CSV"
   )
 with col_ver:
   st.markdown(
@@ -197,7 +198,7 @@ SECTOR_MAP = {
     "GS": "傳統金融",
     "BAC": "傳統金融",
     "XOM": "傳統能源",
-    "CVX": "傳統能源",
+    "CVX": "推統能源",
     "OXY": "傳統能源",
     "LLY": "醫藥醫療",
     "UNH": "醫藥醫療",
@@ -721,7 +722,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Bark Push Syntax Fixed</div>",
+    f" ({BUILD_DATE}) · Bark Push Architecture</div>",
     unsafe_allow_html=True,
 )
 
