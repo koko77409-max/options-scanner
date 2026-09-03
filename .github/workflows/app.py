@@ -10,9 +10,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.4.3"
+APP_VERSION = "v3.4.4"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Hardcoded 5-Minute Auto-Cruise + OTM 15% Safe Margin"
+BUILD_TAG = "Fixed Delayed Bid/Ask Misclassification + 5-Min Hardcoded Cruise"
 LOG_FILE = "trade_log.csv"
 AUTO_SCAN_INTERVAL_SEC = 300  # 固定寫死 5 分鐘 (300 秒)
 
@@ -81,7 +81,7 @@ with col_title:
       f" <span class='version-badge'>{APP_VERSION}</span>",
       unsafe_allow_html=True,
   )
-  st.caption("內置 5 分鐘固定巡航週期 · 自動寫入 CSV 紀錄 · OTM 15% 精準容限")
+  st.caption("抗數據延遲誤殺 · 5分鐘固定巡航 · 自動寫入 CSV 紀錄 · OTM 15% 容限")
 with col_ver:
   st.markdown(
       f"<div style='text-align:right; font-size:12px;"
@@ -273,8 +273,13 @@ def scan_pure_flow(
             mid_price = (
                 (c_bid + c_ask) / 2.0 if (c_bid > 0 and c_ask > 0) else c_price
             )
+            # 🔥 抗延遲買盤判定：漲幅達標直接確認為主動推升，不再被過期 Bid/Ask 誤殺
             is_buyer_initiated = (
-                (c_price >= mid_price * 0.98) if mid_price > 0 else True
+                True
+                if c_pct_change >= min_gain_pct
+                else (
+                    (c_price >= mid_price * 0.98) if mid_price > 0 else True
+                )
             )
             otm_pct = (
                 (c_strike - curr_price) / curr_price if curr_price > 0 else 0.0
@@ -404,8 +409,13 @@ def scan_pure_flow(
             mid_price = (
                 (p_bid + p_ask) / 2.0 if (p_bid > 0 and p_ask > 0) else p_price
             )
+            # 🔥 抗延遲買盤判定：做空合約漲幅達標直接確認為買入 Put
             is_buyer_initiated = (
-                (p_price >= mid_price * 0.98) if mid_price > 0 else True
+                True
+                if p_pct_change >= min_gain_pct
+                else (
+                    (p_price >= mid_price * 0.98) if mid_price > 0 else True
+                )
             )
             otm_pct = (
                 (curr_price - p_strike) / curr_price if curr_price > 0 else 0.0
@@ -628,7 +638,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · 5-Min Hardcoded Cruise</div>",
+    f" ({BUILD_DATE}) · Anti-Misclassification Hardened</div>",
     unsafe_allow_html=True,
 )
 
