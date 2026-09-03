@@ -1,5 +1,35 @@
+已經將 **Bark 即時推送功能** 完整整合至代碼（**v3.6.0 Bark 推送與多到期日巡航版**）。
+
+---
+
+### 本次升級新特性
+
+1. **📱 側邊欄新增 Bark 配置**：
+* 在側邊欄可直接輸入你的 **Bark Device Key**（例如你在 iPhone 打開 Bark App 看到的 `[https://api.day.app/你的Key/](https://api.day.app/你的Key/)` 後面那串 Key，支援安全密碼隱藏輸入）。
+* 旁邊提供「🔔 測試 Bark 推送」按鈕，輸入後可一鍵測試手機是否成功響鈴。
+
+
+2. **🎯 智能即時推送**：
+* 當系統巡航掃描到任何符合條件的 **「🟢 建議買入」** 信號時，會自動秒級推送到你的 iPhone。
+* 通知包含：標的代號、合約方向、行使價、單張成本、大單體量、合約當日漲幅，以及建議的**止盈與剛性止損點位**。
+
+
+3. **無縫整合原生 Python 函式庫**：
+* 使用 `urllib` 進行網絡請求，無需額外 `pip install requests`，保持環境純淨輕量。
+
+
+
+---
+
+### 完整代碼 (`app.py` - v3.6.0)
+
+請直接全選複製並覆蓋 GitHub 上的 `app.py`：
+
+```python
 import os
 import time
+import urllib.parse
+import urllib.request
 import warnings
 from datetime import datetime
 import numpy as np
@@ -10,9 +40,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.5.0"
+APP_VERSION = "v3.6.0"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Multi-Expiration (Sept+Oct) + Anti-429 Rate Pacing + Auto-Cruise"
+BUILD_TAG = "Bark Push Notifications + Multi-Expiration Auto-Cruise"
 LOG_FILE = "trade_log.csv"
 AUTO_SCAN_INTERVAL_SEC = 300  # 固定 5 分鐘巡航 (300 秒)
 
@@ -45,6 +75,15 @@ st.markdown(
 
 st.sidebar.title("⚙️ 主力資金雷達參數")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
+
+# 📱 Bark 即時通知配置
+st.sidebar.markdown("### 📱 iPhone Bark 推送通知")
+bark_device_key = st.sidebar.text_input(
+    "Bark Device Key",
+    type="password",
+    help="輸入 iPhone Bark App 提供的專屬 Key (無需包含網址，例如: eXXXXX)",
+    value="",
+)
 
 # ⏱️ 定時自動巡航開關（固定 5 分鐘）
 st.sidebar.markdown("### ⏱️ 定時自動巡航")
@@ -81,7 +120,9 @@ with col_title:
       f" <span class='version-badge'>{APP_VERSION}</span>",
       unsafe_allow_html=True,
   )
-  st.caption("全到期日穿透 (9月+10月) · 智能防 429 錯峰 · 5分鐘固定巡航 · 自動記錄 CSV")
+  st.caption(
+      "Bark 即時推送 · 全到期日穿透 · 智能防 429 錯峰 · 5分鐘固定巡航 · 自動記錄 CSV"
+  )
 with col_ver:
   st.markdown(
       f"<div style='text-align:right; font-size:12px;"
@@ -89,6 +130,45 @@ with col_ver:
       f" {APP_VERSION}</strong></div>",
       unsafe_allow_html=True,
   )
+
+
+# ==========================================
+# Bark 推送模組
+# ==========================================
+def send_bark_alert(key, title, body, group="UOA_Alerts"):
+  if not key or not key.strip():
+    return False
+  clean_key = key.strip().strip("/")
+  params = urllib.parse.urlencode({
+      "title": title,
+      "body": body,
+      "group": group,
+      "sound": "bell",
+      "icon": "https://img.icons8.com/fluency/96/bullish.png",
+  })
+  url = f"https://api.day.app/{clean_key}/?{params}"
+  try:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+      return resp.status == 200
+  except Exception:
+    return False
+
+
+# 側邊欄 Bark 測試按鈕
+if st.sidebar.button("🔔 測試 Bark 推送"):
+  if bark_device_key:
+    ok = send_bark_alert(
+        bark_device_key,
+        "⚡ 美股期權終端連線成功",
+        "Bark 推送配置正常，主力買入信號將即時推送到此設備！",
+    )
+    if ok:
+      st.sidebar.success("✅ 推送成功！請檢查手機通知。")
+    else:
+      st.sidebar.error("❌ 推送失敗，請確認 Bark Key 是否正確。")
+  else:
+    st.sidebar.warning("請先輸入 Bark Device Key。")
 
 SECTOR_MAP = {
     "SPY": "大盤 ETF",
@@ -217,7 +297,7 @@ def scan_pure_flow(
 
   for sym in tickers:
     try:
-      # 智能防 429 錯峰請求延遲 (0.12 秒)
+      # 防 429 智能微延遲
       time.sleep(0.12)
 
       t_obj = yf.Ticker(sym)
@@ -240,13 +320,13 @@ def scan_pure_flow(
       if not expirations:
         continue
 
-      # 🔥 抓取符合 DTE 範圍內的所有主要到期日 (同時涵蓋 9 月底與 10 月中旬)
+      # 同時抓取範圍內的 2 個主流到期日
       target_dates = []
       for exp in expirations:
         dte = (datetime.strptime(exp, "%Y-%m-%d") - today).days
         if d_min <= dte <= d_max:
           target_dates.append((exp, dte))
-          if len(target_dates) >= 2:  # 抓取最近的 2 個主流到期週
+          if len(target_dates) >= 2:
             break
 
       if not target_dates:
@@ -285,7 +365,6 @@ def scan_pure_flow(
                   if (c_bid > 0 and c_ask > 0)
                   else c_price
               )
-              # 抗盤口延遲：大漲直接判定為多頭推升
               is_buyer_initiated = (
                   True
                   if c_pct_change >= min_gain_pct
@@ -530,7 +609,7 @@ def scan_pure_flow(
                   "止盈目標 (+60%)": tp_target,
                   "止損底線 (-35%)": sl_target,
                   "成交量 / OI (倍數)": (
-                      f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)"
+                      f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)"
                   ),
                   "系統判定理由": reason,
               })
@@ -552,7 +631,7 @@ def scan_pure_flow(
 
 
 # ==========================================
-# 核心掃描觸發器
+# 核心掃描觸發器 (整合 Bark 自動推送)
 # ==========================================
 def run_scan():
   with st.spinner("正在跨週期穿透核心資產期權鏈 (涵蓋9月與10月大單)..."):
@@ -571,7 +650,7 @@ def run_scan():
     st.session_state["pure_uoa_df"] = uoa_df
     st.session_state["pure_spread_df"] = spread_df
 
-    # 🔥 自動記錄「🟢 建議買入」標的
+    # 🔥 自動記錄並推送「🟢 建議買入」標的
     if not uoa_df.empty:
       rec_buys = uoa_df[uoa_df["推薦評級"].str.contains("建議買入")].copy()
       if not rec_buys.empty:
@@ -580,6 +659,19 @@ def run_scan():
             f"✅ 成功將 {len(rec_buys)} 個「建議買入」合約寫入本地歷史紀錄！",
             icon="📝",
         )
+
+        # 📱 Bark 即時通知推送
+        if bark_device_key:
+          for _, row in rec_buys.iterrows():
+            title = f"🟢 主力買入信號: {row['標的代號']} {row['異動行使價']}"
+            body = (
+                f"成本: ${row['單張成本 ($)']} | 漲幅:"
+                f" {row['合約當日漲跌']}\n大單體量: {row['大單成交額"
+                f" ($)']}\n建議限價: {row['建議買入限價']}\n止盈:"
+                f" {row['止盈目標 (+60%)']} | 止損: {row['止損底線"
+                " (-35%)']}"
+            )
+            send_bark_alert(bark_device_key, title, body)
 
 
 # 手動觸發按鈕
@@ -653,7 +745,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Fully Hardened Architecture</div>",
+    f" ({BUILD_DATE}) · Bark Push Architecture</div>",
     unsafe_allow_html=True,
 )
 
@@ -669,3 +761,5 @@ if auto_scan_enabled:
     time.sleep(1)
   run_scan()
   st.rerun()
+
+```
