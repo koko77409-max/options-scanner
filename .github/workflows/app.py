@@ -8,9 +8,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.1.0"
+APP_VERSION = "v3.2.0"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Smart Flow Hardened: Automatic Buyer-Initiated Flow & Notional Filter"
+BUILD_TAG = "Smart Flow Momentum Hardened: +10% Price Surge & Momentum Filter"
 
 warnings.filterwarnings("ignore")
 
@@ -47,11 +47,12 @@ max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 2000
 min_rr_ratio = st.sidebar.slider("🔥 價差最低盈虧比 (1 : X)", 1.0, 3.0, 1.3, 0.1)
 
 st.sidebar.markdown("### 🚨 知情資金 (UOA) 爆量門檻")
-min_uoa_vol = st.sidebar.number_input("合約最小成交量 (張)", 100, 10000, 800, 100)
-min_vol_oi_ratio = st.sidebar.slider("Vol / OI 放大倍數", 1.5, 10.0, 2.5, 0.5)
+min_uoa_vol = st.sidebar.number_input("合約最小成交量 (張)", 100, 10000, 500, 100)
+min_vol_oi_ratio = st.sidebar.slider("Vol / OI 放大倍數", 1.5, 10.0, 2.0, 0.5)
 min_notional_usd = st.sidebar.number_input("大單權利金總體量 ($)", 10000, 1000000, 150000, 25000)
 
-st.sidebar.markdown("### 🛡️ 實戰風控模組")
+st.sidebar.markdown("### 🛡️ 主力動能硬防護 (防陰跌砸盤)")
+min_contract_gain_pct = st.sidebar.slider("🔥 合約當日最低漲幅 (%)", 0, 50, 10, 5)
 avoid_earnings = st.sidebar.checkbox("自動剔除 7 天內即將公布財報標的", value=True)
 filter_liquidity = st.sidebar.checkbox("自動過濾寬點差合約 (點差 < $0.40)", value=True)
 limit_sector_risk = st.sidebar.checkbox("板塊去重 (同一板塊最多 2 組)", value=True)
@@ -65,7 +66,7 @@ with col_title:
         f"## ⚡ 美股期權主力資金流追蹤終端 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("內置買盤算法判定（自動剔除機構平倉砸盤）+ 權利金總量過濾 + 跨價單自動識別")
+    st.caption("內置「合約動能拉升過濾」+ 買盤算法判定 + 權利金總量過濾，徹底排除陰跌出貨單")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心架構：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -115,7 +116,7 @@ def check_earnings_risk(ticker_obj):
         pass
     return False
 
-def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, check_liq, avoid_earn, min_notional):
+def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, check_liq, avoid_earn, min_notional, min_gain_pct):
     today = datetime.today()
     uoa_alerts = []
     spread_recommendations = []
@@ -164,17 +165,25 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                         c_price = float(c_row.get("lastPrice", 0.0))
                         c_bid = float(c_row.get("bid", 0.0))
                         c_ask = float(c_row.get("ask", 0.0))
+                        c_pct_change = float(c_row.get("percentChange", 0.0))
+                        if pd.isna(c_pct_change):
+                            c_pct_change = 0.0
+                            
                         cost_total = round(c_price * 100, 1)
                         notional_usd = round(c_price * c_vol * 100, 1)
 
-                        # 漏洞修復 1：主動買入 (Ask) 算法識別
-                        # 若成交價貼近 Bid，屬於主動賣出砸盤，自動過濾
+                        # 主動買盤判定
                         mid_price = (c_bid + c_ask) / 2.0 if (c_bid > 0 and c_ask > 0) else c_price
                         is_buyer_initiated = (c_price >= mid_price * 0.98) if mid_price > 0 else True
 
                         otm_pct = (c_strike - curr_price) / curr_price if curr_price > 0 else 0.0
 
-                        if not is_buyer_initiated:
+                        # 🔥 關鍵修復：合約當日必須上漲（動能爆發），徹底淘汰陰跌單
+                        if c_pct_change < min_gain_pct:
+                            rec_badge = "🔴 嚴禁買入"
+                            reason = f"合約動能失真 ({round(c_pct_change, 1)}%)，未達最低暴增漲幅 (+{min_gain_pct}%)，屬陰跌拋售"
+                            tp_target, sl_target = "不適用", "不適用"
+                        elif not is_buyer_initiated:
                             rec_badge = "🔴 嚴禁買入"
                             reason = f"主力主動砸盤平倉 (打在 Bid 價附近)，非買盤進場"
                             tp_target, sl_target = "不適用", "不適用"
@@ -192,7 +201,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             tp_target, sl_target = "不適用", "不適用"
                         else:
                             rec_badge = "🟢 建議買入"
-                            reason = f"主動吃貨 (+{round(otm_pct*100, 1)}%)，總成交額 ${int(notional_usd):,}，主力真金白銀做多"
+                            reason = f"主動追價掃盤 (漲幅 +{round(c_pct_change, 1)}%)，總額 ${int(notional_usd):,}，主力動能極強"
                             tp_target = f"${round(c_price * 1.6, 2)} ~ ${round(c_price * 1.8, 2)}"
                             sl_target = f"${round(c_price * 0.65, 2)}"
 
@@ -230,6 +239,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             "推薦評級": rec_badge,
                             "標的代號": sym,
                             "方向類型": "🟢 看漲 (Call 異動)",
+                            "合約當日漲跌": f"{'+' if c_pct_change>0 else ''}{round(c_pct_change, 1)}%",
                             "到期日": f"{target_exp} ({target_dte}天)",
                             "異動行使價": f"${c_strike} Call",
                             "單張成本 ($)": f"${cost_total}",
@@ -256,6 +266,10 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                         p_price = float(p_row.get("lastPrice", 0.0))
                         p_bid = float(p_row.get("bid", 0.0))
                         p_ask = float(p_row.get("ask", 0.0))
+                        p_pct_change = float(p_row.get("percentChange", 0.0))
+                        if pd.isna(p_pct_change):
+                            p_pct_change = 0.0
+                            
                         cost_total = round(p_price * 100, 1)
                         notional_usd = round(p_price * p_vol * 100, 1)
 
@@ -264,7 +278,12 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
 
                         otm_pct = (curr_price - p_strike) / curr_price if curr_price > 0 else 0.0
 
-                        if not is_buyer_initiated:
+                        # 🔥 關鍵修復：做空 Put 亦必須伴隨暴漲，淘汰像 WMT 一路跌的假單
+                        if p_pct_change < min_gain_pct:
+                            rec_badge = "🔴 嚴禁買入"
+                            reason = f"合約動能失真 ({round(p_pct_change, 1)}%)，未達最低暴增漲幅 (+{min_gain_pct}%)，屬陰跌出貨"
+                            tp_target, sl_target = "不適用", "不適用"
+                        elif not is_buyer_initiated:
                             rec_badge = "🔴 嚴禁買入"
                             reason = f"主力平倉看跌期權 (打在 Bid 價)，非做空下注"
                             tp_target, sl_target = "不適用", "不適用"
@@ -282,7 +301,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             tp_target, sl_target = "不適用", "不適用"
                         else:
                             rec_badge = "🟢 建議買入"
-                            reason = f"主動吃貨做空 (-{round(otm_pct*100, 1)}%)，總額 ${int(notional_usd):,}，主力下注大跌"
+                            reason = f"主動追價做空 (漲幅 +{round(p_pct_change, 1)}%)，總額 ${int(notional_usd):,}，主力爆量押注大跌"
                             tp_target = f"${round(p_price * 1.6, 2)} ~ ${round(p_price * 1.8, 2)}"
                             sl_target = f"${round(p_price * 0.65, 2)}"
 
@@ -320,6 +339,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             "推薦評級": rec_badge,
                             "標的代號": sym,
                             "方向類型": "🔴 做空 (Put 異動)",
+                            "合約當日漲跌": f"{'+' if p_pct_change>0 else ''}{round(p_pct_change, 1)}%",
                             "到期日": f"{target_exp} ({target_dte}天)",
                             "異動行使價": f"${p_strike} Put",
                             "單張成本 ($)": f"${cost_total}",
@@ -327,7 +347,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             "建議買入限價": f"${p_price}",
                             "止盈目標 (+60%)": tp_target,
                             "止損底線 (-35%)": sl_target,
-                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)",
+                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)",
                             "系統判定理由": reason,
                         })
         except Exception:
@@ -348,9 +368,9 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
     return df_uoa, df_spreads
 
 if st.button("🚀 開始全市場主力資金流 (UOA) 穿透掃描"):
-    with st.spinner("正在逐一穿透 70 隻核心資產期權鏈，執行主動吃貨與大單金額算法過濾..."):
+    with st.spinner("正在逐一穿透 70 隻核心資產期權鏈，執行動能爆發與大單金額算法過濾..."):
         uoa_df, spread_df = scan_pure_flow(
-            DEFAULT_WATCHLIST, dte_min, dte_max, min_uoa_vol, min_vol_oi_ratio, max_budget, min_rr_ratio, filter_liquidity, avoid_earnings, min_notional_usd
+            DEFAULT_WATCHLIST, dte_min, dte_max, min_uoa_vol, min_vol_oi_ratio, max_budget, min_rr_ratio, filter_liquidity, avoid_earnings, min_notional_usd, min_contract_gain_pct
         )
         st.session_state["pure_uoa_df"] = uoa_df
         st.session_state["pure_spread_df"] = spread_df
@@ -366,7 +386,7 @@ if "pure_uoa_df" in st.session_state and "pure_spread_df" in st.session_state:
     col2.metric("🚨 資金異動合約", f"{len(uoa_df)} 個")
     col3.metric("🟢 真實主動買盤", f"{rec_count} 個")
 
-    st.markdown("### 🚨 知情主力資金異動雷達 (已過濾砸盤與小額單)")
+    st.markdown("### 🚨 知情主力資金異動雷達 (已過濾陰跌與雜質單)")
     if not uoa_df.empty:
         st.dataframe(uoa_df, use_container_width=True, hide_index=True)
     else:
@@ -382,7 +402,7 @@ if "pure_uoa_df" in st.session_state and "pure_spread_df" in st.session_state:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
-    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Hardened Smart Money Logic"
+    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Price-Action Momentum Hardened"
     f"</div>",
     unsafe_allow_html=True,
 )
