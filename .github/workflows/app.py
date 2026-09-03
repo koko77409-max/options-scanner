@@ -1,3 +1,4 @@
+import os
 import warnings
 from datetime import datetime
 import numpy as np
@@ -8,9 +9,10 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.2.0"
+APP_VERSION = "v3.3.0"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Smart Flow Momentum Hardened: +10% Price Surge & Momentum Filter"
+BUILD_TAG = "Trade Logger Enabled: Auto-logging 'Buy' signals to local CSV"
+LOG_FILE = "trade_log.csv"
 
 warnings.filterwarnings("ignore")
 
@@ -66,7 +68,7 @@ with col_title:
         f"## ⚡ 美股期權主力資金流追蹤終端 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("內置「合約動能拉升過濾」+ 買盤算法判定 + 權利金總量過濾，徹底排除陰跌出貨單")
+    st.caption("自動將「🟢 建議買入」高勝率信號沉澱至本地交易紀錄本，支援回測與覆盤")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心架構：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -91,6 +93,23 @@ SECTOR_MAP = {
     "LLY": "醫藥醫療", "UNH": "醫藥醫療", "CAT": "工業機械", "GE": "工業機械"
 }
 DEFAULT_WATCHLIST = list(SECTOR_MAP.keys())
+
+def save_to_log(df_records):
+    if df_records.empty:
+        return
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    records = df_records.copy()
+    records.insert(0, "記錄時間", now_str)
+    
+    if not os.path.exists(LOG_FILE):
+        records.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
+    else:
+        existing = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+        # 避免重複寫入相同記錄時間與合約
+        combined = pd.concat([records, existing], ignore_index=True).drop_duplicates(
+            subset=["標的代號", "異動行使價", "到期日", "合約當日漲跌"]
+        )
+        combined.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
 
 def check_earnings_risk(ticker_obj):
     try:
@@ -172,13 +191,11 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                         cost_total = round(c_price * 100, 1)
                         notional_usd = round(c_price * c_vol * 100, 1)
 
-                        # 主動買盤判定
                         mid_price = (c_bid + c_ask) / 2.0 if (c_bid > 0 and c_ask > 0) else c_price
                         is_buyer_initiated = (c_price >= mid_price * 0.98) if mid_price > 0 else True
 
                         otm_pct = (c_strike - curr_price) / curr_price if curr_price > 0 else 0.0
 
-                        # 🔥 關鍵修復：合約當日必須上漲（動能爆發），徹底淘汰陰跌單
                         if c_pct_change < min_gain_pct:
                             rec_badge = "🔴 嚴禁買入"
                             reason = f"合約動能失真 ({round(c_pct_change, 1)}%)，未達最低暴增漲幅 (+{min_gain_pct}%)，屬陰跌拋售"
@@ -278,7 +295,6 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
 
                         otm_pct = (curr_price - p_strike) / curr_price if curr_price > 0 else 0.0
 
-                        # 🔥 關鍵修復：做空 Put 亦必須伴隨暴漲，淘汰像 WMT 一路跌的假單
                         if p_pct_change < min_gain_pct:
                             rec_badge = "🔴 嚴禁買入"
                             reason = f"合約動能失真 ({round(p_pct_change, 1)}%)，未達最低暴增漲幅 (+{min_gain_pct}%)，屬陰跌出貨"
@@ -347,7 +363,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             "建議買入限價": f"${p_price}",
                             "止盈目標 (+60%)": tp_target,
                             "止損底線 (-35%)": sl_target,
-                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)",
+                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)",
                             "系統判定理由": reason,
                         })
         except Exception:
@@ -374,6 +390,13 @@ if st.button("🚀 開始全市場主力資金流 (UOA) 穿透掃描"):
         )
         st.session_state["pure_uoa_df"] = uoa_df
         st.session_state["pure_spread_df"] = spread_df
+        
+        # 🔥 自動記錄「🟢 建議買入」標的
+        if not uoa_df.empty:
+            rec_buys = uoa_df[uoa_df["推薦評級"].str.contains("建議買入")].copy()
+            if not rec_buys.empty:
+                save_to_log(rec_buys)
+                st.toast(f"✅ 成功將 {len(rec_buys)} 個「建議買入」合約寫入本地歷史紀錄！", icon="📝")
 
 if "pure_uoa_df" in st.session_state and "pure_spread_df" in st.session_state:
     uoa_df = st.session_state["pure_uoa_df"]
@@ -399,10 +422,34 @@ if "pure_uoa_df" in st.session_state and "pure_spread_df" in st.session_state:
     else:
         st.info("暫無符合預算且盈虧比達標的配套價差組合。")
 
+# ==========================================
+# 歷史紀錄本 (Trade Log Viewer)
+# ==========================================
+st.markdown("---")
+st.markdown("### 📒 「建議買入」歷史信號紀錄本")
+
+if os.path.exists(LOG_FILE):
+    log_data = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+    if not log_data.empty:
+        col_dl, col_del = st.columns([4, 1])
+        with col_dl:
+            csv_data = log_data.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                label="📥 下載完整歷史交易紀錄 (CSV)",
+                data=csv_data,
+                file_name=f"options_smart_flow_history_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+        st.dataframe(log_data, use_container_width=True, hide_index=True)
+    else:
+        st.caption("目前暫無歷史紀錄。")
+else:
+    st.caption("尚未產生任何記錄，當雷達掃描出「🟢 建議買入」標的時會自動寫入。")
+
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
-    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Price-Action Momentum Hardened"
+    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Trade Logging Architecture"
     f"</div>",
     unsafe_allow_html=True,
 )
