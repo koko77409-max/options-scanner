@@ -10,10 +10,11 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.4.1"
+APP_VERSION = "v3.4.3"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Clean Engine: Removed Spread/Sector Filters + Auto-Cruise"
+BUILD_TAG = "Hardcoded 5-Minute Auto-Cruise + OTM 15% Safe Margin"
 LOG_FILE = "trade_log.csv"
+AUTO_SCAN_INTERVAL_SEC = 300  # 固定寫死 5 分鐘 (300 秒)
 
 warnings.filterwarnings("ignore")
 
@@ -45,10 +46,9 @@ st.markdown(
 st.sidebar.title("⚙️ 主力資金雷達參數")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
 
-# ⏱️ 定時自動巡航
+# ⏱️ 定時自動巡航開關（固定 5 分鐘）
 st.sidebar.markdown("### ⏱️ 定時自動巡航")
-auto_scan_enabled = st.sidebar.checkbox("開啟定時自動巡航", value=False)
-scan_interval_min = st.sidebar.slider("掃描頻率 (分鐘)", 3, 15, 5, 1)
+auto_scan_enabled = st.sidebar.checkbox("開啟 5 分鐘定時自動巡航", value=True)
 
 dte_min, dte_max = st.sidebar.slider("到期日範圍 (DTE)", 14, 60, (20, 45))
 max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 2000, 350, 50)
@@ -81,9 +81,7 @@ with col_title:
       f" <span class='version-badge'>{APP_VERSION}</span>",
       unsafe_allow_html=True,
   )
-  st.caption(
-      "純淨主力資金流追蹤 · 自動寫入 CSV 紀錄 · 動能硬防護 · 無多餘限制"
-  )
+  st.caption("內置 5 分鐘固定巡航週期 · 自動寫入 CSV 紀錄 · OTM 15% 精準容限")
 with col_ver:
   st.markdown(
       f"<div style='text-align:right; font-size:12px;"
@@ -302,7 +300,7 @@ def scan_pure_flow(
                   f" (${int(min_notional):,})"
               )
               tp_target, sl_target = "不適用", "不適用"
-            elif otm_pct > 0.12:
+            elif otm_pct > 0.15:
               rec_badge = "🔴 嚴禁買入"
               reason = (
                   f"深度虛值 (+{round(otm_pct*100, 1)}%)，彩票陷阱 /"
@@ -431,7 +429,7 @@ def scan_pure_flow(
                   f" (${int(min_notional):,})"
               )
               tp_target, sl_target = "不適用", "不適用"
-            elif otm_pct > 0.12:
+            elif otm_pct > 0.15:
               rec_badge = "🔴 嚴禁買入"
               reason = (
                   f"深度虛值 Put (-{round(otm_pct*100, 1)}%)，彩票對沖 /"
@@ -530,7 +528,9 @@ def scan_pure_flow(
 # 核心掃描觸發器
 # ==========================================
 def run_scan():
-  with st.spinner("正在逐一穿透核心資產期權鏈，執行動能爆發與大單金額算法過濾..."):
+  with st.spinner(
+      "正在逐一穿透核心資產期權鏈，執行動能爆發與大單金額算法過濾..."
+  ):
     uoa_df, spread_df = scan_pure_flow(
         DEFAULT_WATCHLIST,
         dte_min,
@@ -561,7 +561,7 @@ def run_scan():
 if st.button("🚀 開始全市場主力資金流 (UOA) 穿透掃描"):
   run_scan()
 
-# 自動巡航啟動（未有數據時初次運行）
+# 自動巡航初次啟動
 if auto_scan_enabled and "pure_uoa_df" not in st.session_state:
   run_scan()
 
@@ -628,17 +628,17 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Clean Cruise Architecture</div>",
+    f" ({BUILD_DATE}) · 5-Min Hardcoded Cruise</div>",
     unsafe_allow_html=True,
 )
 
-# 🔥 自動巡航倒計時器（置於頁面最底，不干擾上方操作）
+# 🔥 5 分鐘固定自動巡航倒數計時器
 if auto_scan_enabled:
   countdown_container = st.empty()
-  for remaining in range(scan_interval_min * 60, 0, -1):
+  for remaining in range(AUTO_SCAN_INTERVAL_SEC, 0, -1):
     mins, secs = divmod(remaining, 60)
     countdown_container.info(
-        f"⏱️ **定時巡航運行中**：下次自動重新掃描倒數 **{mins:02d}分"
+        f"⏱️ **5 分鐘定時巡航運行中**：下次自動重新掃描倒數 **{mins:02d}分"
         f" {secs:02d}秒**...（可隨時取消側邊欄勾選）"
     )
     time.sleep(1)
