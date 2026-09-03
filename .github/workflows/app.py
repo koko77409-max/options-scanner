@@ -5,24 +5,19 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# ==========================================
-# 版本號定義
-# ==========================================
-APP_VERSION = "v2.9.2"
+APP_VERSION = "v2.9.3"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Direct Signal Board: Clean Strike & Order Price Display"
+BUILD_TAG = "Full Pipeline Scan & Lossless UOA Signal Capture"
 
 warnings.filterwarnings("ignore")
 
-# 頁面配置
 st.set_page_config(
-    page_title=f"美股期權量化埋伏與信號板 ({APP_VERSION})",
+    page_title=f"美股期權量化埋伏信號板 ({APP_VERSION})",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# 樣式自訂
 st.markdown(
     """
 <style>
@@ -41,18 +36,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 側邊欄配置
 st.sidebar.title("⚙️ 參數設定")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
 
 dte_min, dte_max = st.sidebar.slider("到期日範圍 (DTE)", 14, 60, (20, 45))
 atr_multiplier = st.sidebar.slider("通道 ATR 倍數", 1.2, 2.5, 1.8, 0.1)
 max_budget = st.sidebar.number_input("單注最大預算 ($)", 20, 2000, 350, 50)
-min_rr_ratio = st.sidebar.slider("🔥 最低盈虧比 (1 : X)", 1.0, 3.0, 1.5, 0.1)
+min_rr_ratio = st.sidebar.slider("🔥 最低盈虧比 (1 : X)", 1.0, 3.0, 1.3, 0.1)
 
 st.sidebar.markdown("### 🚨 異動 (UOA) 門檻")
-min_uoa_vol = st.sidebar.number_input("異動最小成交量 (張)", 100, 10000, 1000, 200)
-min_vol_oi_ratio = st.sidebar.slider("Vol / OI 倍數", 1.5, 10.0, 3.0, 0.5)
+min_uoa_vol = st.sidebar.number_input("異動最小成交量 (張)", 100, 10000, 800, 100)
+min_vol_oi_ratio = st.sidebar.slider("Vol / OI 倍數", 1.5, 10.0, 2.5, 0.5)
 
 st.sidebar.markdown("### 🛡️ 全自動風控")
 avoid_earnings = st.sidebar.checkbox("自動避開 7 天內財報", value=True)
@@ -66,7 +60,6 @@ sl_ratio = st.sidebar.slider("剛性止損比率 (%)", 20, 60, 40) / 100.0
 st.sidebar.markdown("---")
 st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`")
 
-# 頂部標題
 col_title, col_ver = st.columns([4, 1])
 with col_title:
     st.markdown(
@@ -151,8 +144,8 @@ def run_scan(tickers, atr_mult, filter_earnings):
             curr_ema8 = float(ema8.iloc[-1])
             curr_ema21 = float(ema21.iloc[-1])
 
-            is_bullish = (curr_ema8 >= curr_ema21) and (curr_close >= curr_ma20 * 0.995)
-            is_bearish = (curr_ema8 < curr_ema21) and (curr_close <= curr_ma20 * 1.005)
+            is_bullish = (curr_ema8 >= curr_ema21) and (curr_close >= curr_ma20 * 0.990)
+            is_bearish = (curr_ema8 < curr_ema21) and (curr_close <= curr_ma20 * 1.010)
 
             if not is_bullish and not is_bearish:
                 continue
@@ -161,7 +154,7 @@ def run_scan(tickers, atr_mult, filter_earnings):
             kc_w = kc_upper.iloc[-1] - kc_lower.iloc[-1]
             comp_ratio = round(float(bb_w / kc_w), 2) if kc_w > 0 else 1.0
 
-            if recent_squeeze or comp_ratio < 1.05:
+            if recent_squeeze or comp_ratio < 1.10:
                 candidates.append({
                     "Symbol": sym,
                     "Direction": "多頭 (CALL)" if is_bullish else "空頭 (PUT)",
@@ -192,7 +185,8 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
     spreads = []
     uoa_alerts = []
 
-    for _, row in candidates_df.head(15).iterrows():
+    # 完整掃描所有技術候選標的
+    for _, row in candidates_df.iterrows():
         sym, curr_price, direction = row["Symbol"], row["Price"], row["Direction"]
         try:
             ticker = yf.Ticker(sym)
@@ -211,7 +205,7 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
 
             chain = ticker.option_chain(target_exp)
 
-            # 1. UOA 異動偵測
+            # 1. 異動掃描 (UOA)
             calls_df = chain.calls.copy()
             if not calls_df.empty:
                 for _, c_row in calls_df.iterrows():
@@ -219,28 +213,28 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
                     c_oi = c_row.get("openInterest", 0)
                     if pd.isna(c_vol) or pd.isna(c_oi) or c_oi == 0:
                         continue
-                    c_ratio = round(c_vol / c_oi, 2)
+                    c_ratio = round(float(c_vol) / float(c_oi), 2)
                     if c_vol >= min_vol and c_ratio >= min_ratio:
                         uoa_alerts.append({
                             "標的代號": sym,
                             "類型": "🔥 CALL 異動掃盤",
                             "到期日": f"{target_exp} ({target_dte}天)",
                             "異動行使價": f"${c_row.get('strike')} Call",
-                            "合約市價": f"${round(c_row.get('lastPrice', 0.0), 2)}",
+                            "合約市價": f"${round(float(c_row.get('lastPrice', 0.0)), 2)}",
                             "成交量": int(c_vol),
                             "未平倉 (OI)": int(c_oi),
                             "Vol/OI 倍數": f"{c_ratio}x"
                         })
 
-            # 2. 垂直價差組合
+            # 2. 垂直價差生成
             if "CALL" in direction:
                 calls = chain.calls.copy()
                 if calls.empty:
                     continue
                 calls = calls.sort_values("strike", ascending=True)
 
-                b_cands = calls[calls["strike"] >= curr_price]
-                s_cands = calls[calls["strike"] >= curr_price * 1.03]
+                b_cands = calls[calls["strike"] >= curr_price * 0.99]
+                s_cands = calls[calls["strike"] >= curr_price * 1.02]
                 if b_cands.empty or s_cands.empty:
                     continue
 
@@ -251,19 +245,19 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
                 s_leg = s_valid.iloc[0]
 
                 if check_liq:
-                    b_bid, b_ask = b_leg["bid"], b_leg["ask"]
-                    s_bid, s_ask = s_leg["bid"], s_leg["ask"]
+                    b_bid, b_ask = float(b_leg.get("bid", 0)), float(b_leg.get("ask", 0))
+                    s_bid, s_ask = float(s_leg.get("bid", 0)), float(s_leg.get("ask", 0))
                     if b_ask <= 0 or s_bid <= 0:
                         continue
-                    if (b_ask - b_bid) > 0.40 or (s_ask - s_bid) > 0.40:
+                    if (b_ask - b_bid) > 0.45 or (s_ask - s_bid) > 0.45:
                         continue
 
-                b_p = b_leg["ask"] if b_leg["ask"] > 0 else b_leg["lastPrice"]
-                s_p = s_leg["bid"] if s_leg["bid"] > 0 else (s_leg["lastPrice"] if s_leg["lastPrice"] < b_p else 0.0)
+                b_p = float(b_leg["ask"]) if float(b_leg["ask"]) > 0 else float(b_leg["lastPrice"])
+                s_p = float(s_leg["bid"]) if float(s_leg["bid"]) > 0 else (float(s_leg["lastPrice"]) if float(s_leg["lastPrice"]) < b_p else 0.0)
 
                 net_debit = max(0.05, round(b_p - s_p, 2))
                 cost = round(net_debit * 100, 2)
-                spread_width = s_leg["strike"] - b_leg["strike"]
+                spread_width = float(s_leg["strike"]) - float(b_leg["strike"])
                 max_profit = round((spread_width * 100) - cost, 2)
                 if max_profit <= 0:
                     continue
@@ -299,8 +293,8 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
                     continue
                 puts = puts.sort_values("strike", ascending=True)
 
-                b_cands = puts[puts["strike"] <= curr_price]
-                s_cands = puts[puts["strike"] <= curr_price * 0.97]
+                b_cands = puts[puts["strike"] <= curr_price * 1.01]
+                s_cands = puts[puts["strike"] <= curr_price * 0.98]
                 if b_cands.empty or s_cands.empty:
                     continue
 
@@ -311,19 +305,19 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
                 s_leg = s_valid.iloc[-1]
 
                 if check_liq:
-                    b_bid, b_ask = b_leg["bid"], b_leg["ask"]
-                    s_bid, s_ask = s_leg["bid"], s_leg["ask"]
+                    b_bid, b_ask = float(b_leg.get("bid", 0)), float(b_leg.get("ask", 0))
+                    s_bid, s_ask = float(s_leg.get("bid", 0)), float(s_leg.get("ask", 0))
                     if b_ask <= 0 or s_bid <= 0:
                         continue
-                    if (b_ask - b_bid) > 0.40 or (s_ask - s_bid) > 0.40:
+                    if (b_ask - b_bid) > 0.45 or (s_ask - s_bid) > 0.45:
                         continue
 
-                b_p = b_leg["ask"] if b_leg["ask"] > 0 else b_leg["lastPrice"]
-                s_p = s_leg["bid"] if s_leg["bid"] > 0 else (s_leg["lastPrice"] if s_leg["lastPrice"] < b_p else 0.0)
+                b_p = float(b_leg["ask"]) if float(b_leg["ask"]) > 0 else float(b_leg["lastPrice"])
+                s_p = float(s_leg["bid"]) if float(s_leg["bid"]) > 0 else (float(s_leg["lastPrice"]) if float(s_leg["lastPrice"]) < b_p else 0.0)
 
                 net_debit = max(0.05, round(b_p - s_p, 2))
                 cost = round(net_debit * 100, 2)
-                spread_width = b_leg["strike"] - s_leg["strike"]
+                spread_width = float(b_leg["strike"]) - float(s_leg["strike"])
                 max_profit = round((spread_width * 100) - cost, 2)
                 if max_profit <= 0:
                     continue
@@ -368,9 +362,8 @@ def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_
 
     return df_spreads, df_uoa
 
-# 執行掃描
 if st.button("🚀 開始全市場量化埋伏與主力異動掃描"):
-    with st.spinner("正在分析技術面、排查財報、計算期權點差並分析 UOA 大單..."):
+    with st.spinner("正在掃描全量候選標的之期權鏈與 UOA 異動..."):
         cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier, avoid_earnings)
         st.session_state["cand_df"] = cand_df
         spread_df, uoa_df = get_options_spreads_and_uoa(
@@ -379,7 +372,6 @@ if st.button("🚀 開始全市場量化埋伏與主力異動掃描"):
         st.session_state["spread_df"] = spread_df
         st.session_state["uoa_df"] = uoa_df
 
-# 安全渲染展示區塊
 if "cand_df" in st.session_state and "spread_df" in st.session_state and "uoa_df" in st.session_state:
     cand_df = st.session_state["cand_df"]
     spread_df = st.session_state["spread_df"]
@@ -393,7 +385,6 @@ if "cand_df" in st.session_state and "spread_df" in st.session_state and "uoa_df
     col3.metric("推薦開倉組合", f"{len(spread_df)} 組")
     col4.metric("🚨 主力異動", f"{len(uoa_df)} 個合約")
 
-    # 1. 垂直價差組合核心信號表格
     st.markdown(f"### 🎯 推薦期權買入指令板 (直接對照買入)")
     if not spread_df.empty and "Cost_Num" in spread_df.columns:
         filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget]
@@ -405,14 +396,12 @@ if "cand_df" in st.session_state and "spread_df" in st.session_state and "uoa_df
     else:
         st.warning("未找到符合條件且避開財報的價差組合。")
 
-    # 2. UOA 主力異動雷達表格
     st.markdown("### 🚨 期權異常異動雷達 (知情資金爆量掃盤)")
     if not uoa_df.empty:
         st.dataframe(uoa_df, use_container_width=True, hide_index=True)
     else:
         st.info("當前候選池標的未錄得異常異動大單。")
 
-    # 3. 技術形態候選池
     st.markdown("### 📋 技術形態候選池 (Squeeze 壓縮狀態)")
     if not cand_df.empty:
         st.dataframe(cand_df, use_container_width=True, hide_index=True)
