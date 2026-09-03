@@ -1,0 +1,33 @@
+name: UOA Options 5-Min Cloud Scanner
+
+on:
+  schedule:
+    # 美東盤中交易時段：週一至週五 UTC 13:30 ~ 20:00 (每 5 分鐘執行一次)
+    - cron: '*/5 13-20 * * 1-5'
+  workflow_dispatch: # 支援在 GitHub 頁面手動一鍵點擊觸發
+
+jobs:
+  scan-and-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 檢出代碼庫
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 運行環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 安裝依賴庫
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy
+
+      - name: 執行主力資金流穿透掃描並推送 Bark
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY || 'vARo3iEDmQv6DbVKM8EW79' }}
+        run: |
+          python cron_scanner.py
