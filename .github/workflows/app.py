@@ -5,19 +5,24 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-APP_VERSION = "v2.8.0"
-BUILD_DATE = "2026-09-02"
-BUILD_TAG = "Auto Earnings Guard & Bid-Ask Spread Liquidity Shield"
+# ==========================================
+# 版本號定義
+# ==========================================
+APP_VERSION = "v2.9.0"
+BUILD_DATE = "2026-09-03"
+BUILD_TAG = "Dual Engine: Vertical Spreads + UOA Smart Money Radar"
 
 warnings.filterwarnings("ignore")
 
+# 頁面配置
 st.set_page_config(
-    page_title=f"美股期權量化埋伏系統 ({APP_VERSION})",
-    page_icon="📈",
+    page_title=f"美股期權量化埋伏與異動雷達 ({APP_VERSION})",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# 暗黑交易終端 CSS
 st.markdown(
     """
 <style>
@@ -31,22 +36,36 @@ st.markdown(
         font-family: monospace;
         font-weight: bold;
     }
+    .radar-badge {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+    }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-st.sidebar.title("⚙️ 策略參數配置")
+# 側邊欄配置
+st.sidebar.title("⚙️ 策略與雷達配置")
 st.sidebar.markdown(f"系統核心版本：`{APP_VERSION}`")
 
 dte_min, dte_max = st.sidebar.slider("期權到期日範圍 (DTE)", 14, 60, (20, 45))
 atr_multiplier = st.sidebar.slider("肯特納通道 ATR 倍數", 1.2, 2.5, 1.8, 0.1)
 max_budget = st.sidebar.number_input("小資金單注最大預算 ($)", 20, 2000, 350, 50)
-min_rr_ratio = st.sidebar.slider("🔥 最低盈虧比門檻 (1 : X)", 1.0, 3.0, 1.5, 0.1)
+min_rr_ratio = st.sidebar.slider("🔥 價差最低盈虧比 (1 : X)", 1.0, 3.0, 1.5, 0.1)
+
+st.sidebar.markdown("### 🚨 UOA 資金異動雷達門檻")
+min_uoa_vol = st.sidebar.number_input("異動合約最小成交量 (張)", 100, 10000, 1000, 200)
+min_vol_oi_ratio = st.sidebar.slider("異動 Vol / OI 放大倍數", 1.5, 10.0, 3.0, 0.5)
 
 st.sidebar.markdown("### 🛡️ 全自動風控防護")
-avoid_earnings = st.sidebar.checkbox("自動剔除 7 天內即將公布財報標的 (防 IV 暴跌)", value=True)
-filter_liquidity = st.sidebar.checkbox("自動剔除流動性差 / 點差過闊合約 (防滑點)", value=True)
+avoid_earnings = st.sidebar.checkbox("自動剔除 7 天內即將公布財報標的", value=True)
+filter_liquidity = st.sidebar.checkbox("自動剔除流動性差 / 寬點差合約", value=True)
 
 st.sidebar.markdown("### 🎯 止盈止損參數")
 tp_ratio_min = st.sidebar.slider("最小止盈比率 (%)", 30, 80, 50) / 100.0
@@ -56,13 +75,14 @@ sl_ratio = st.sidebar.slider("剛性止損比率 (%)", 20, 60, 40) / 100.0
 st.sidebar.markdown("---")
 st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`\n\n特性：`{BUILD_TAG}`")
 
+# 頂部標題
 col_title, col_ver = st.columns([4, 1])
 with col_title:
     st.markdown(
-        f"## 📊 美股小資金期權量化埋伏儀表板 <span class='version-badge'>{APP_VERSION}</span>",
+        f"## ⚡ 美股期權量化埋伏與主力異動終端 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("TTM Squeeze 波動率收斂 + EMA 趨勢對齊 + 自動財報過濾 + 流動性點差防護引擎")
+    st.caption("TTM Squeeze 突破埋伏 + EMA 趨勢確認 + UOA 異常期權掃盤偵測 + 垂直價差對沖")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心引擎：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -167,17 +187,20 @@ def run_scan(tickers, atr_mult, filter_earnings):
         return pd.DataFrame(columns=["Symbol", "Direction", "Price", "20MA", "EMA8/21", "壓縮比率", "Squeeze現狀"])
     return pd.DataFrame(candidates)
 
-def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr, check_liq):
-    columns_list = [
+def get_options_spreads_and_uoa(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_pct, min_rr, check_liq, min_vol, min_ratio):
+    spreads_columns = [
         "標的", "方向", "現價", "到期日", "組合策略", "買入腿 (Long)",
         "賣出腿 (Short)", "淨成本 ($)", "最大獲利 ($)", "盈虧比",
         "建議止盈獲利 ($)", "目標平倉單價 ($)", "剛性止損 ($)", "Cost_Num", "RR_Num"
     ]
+    uoa_columns = ["標的", "類型", "到期日", "行使價", "最新價", "成交量", "未平倉 (OI)", "Vol/OI 倍數"]
+
     if candidates_df.empty:
-        return pd.DataFrame(columns=columns_list)
+        return pd.DataFrame(columns=spreads_columns), pd.DataFrame(columns=uoa_columns)
 
     today = datetime.today()
     spreads = []
+    uoa_alerts = []
 
     for _, row in candidates_df.head(15).iterrows():
         sym, curr_price, direction = row["Symbol"], row["Price"], row["Direction"]
@@ -198,6 +221,28 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
 
             chain = ticker.option_chain(target_exp)
 
+            # ---------------- 1. UOA 異常異動偵測 (看漲 Calls) ----------------
+            calls_df = chain.calls.copy()
+            if not calls_df.empty:
+                for _, c_row in calls_df.iterrows():
+                    c_vol = c_row.get("volume", 0)
+                    c_oi = c_row.get("openInterest", 0)
+                    if pd.isna(c_vol) or pd.isna(c_oi) or c_oi == 0:
+                        continue
+                    c_ratio = round(c_vol / c_oi, 2)
+                    if c_vol >= min_vol and c_ratio >= min_ratio:
+                        uoa_alerts.append({
+                            "標的": sym,
+                            "類型": "🔥 CALL 異動掃盤",
+                            "到期日": f"{target_exp} ({target_dte}D)",
+                            "行使價": f"${c_row.get('strike')}",
+                            "最新價": round(c_row.get("lastPrice", 0.0), 2),
+                            "成交量": int(c_vol),
+                            "未平倉 (OI)": int(c_oi),
+                            "Vol/OI 倍數": f"{c_ratio}x"
+                        })
+
+            # ---------------- 2. 垂直價差組合生成 ----------------
             if "CALL" in direction:
                 calls = chain.calls.copy()
                 if calls.empty:
@@ -323,41 +368,63 @@ def get_options_spreads(candidates_df, d_min, d_max, tp_min_pct, tp_max_pct, sl_
         except Exception:
             continue
 
-    if not spreads:
-        return pd.DataFrame(columns=columns_list)
-    return pd.DataFrame(spreads).sort_values(by="RR_Num", ascending=False)
+    df_spreads = pd.DataFrame(spreads)
+    if not df_spreads.empty:
+        df_spreads = df_spreads.sort_values(by="RR_Num", ascending=False)
+    else:
+        df_spreads = pd.DataFrame(columns=spreads_columns)
 
-if st.button("🚀 開始執行全市場量化掃描"):
-    with st.spinner("正在執行技術形態、財報日過濾與流動性深度驗證..."):
+    df_uoa = pd.DataFrame(uoa_alerts)
+    if df_uoa.empty:
+        df_uoa = pd.DataFrame(columns=uoa_columns)
+
+    return df_spreads, df_uoa
+
+# 執行掃描
+if st.button("🚀 開始全市場量化埋伏與主力異動掃描"):
+    with st.spinner("正在分析 K 線形態、財報日、流動性並偵測期權異動大單..."):
         cand_df = run_scan(DEFAULT_WATCHLIST, atr_multiplier, avoid_earnings)
         st.session_state["cand_df"] = cand_df
-        st.session_state["spread_df"] = get_options_spreads(
-            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio, filter_liquidity
+        spread_df, uoa_df = get_options_spreads_and_uoa(
+            cand_df, dte_min, dte_max, tp_ratio_min, tp_ratio_max, sl_ratio, min_rr_ratio, filter_liquidity, min_uoa_vol, min_vol_oi_ratio
         )
+        st.session_state["spread_df"] = spread_df
+        st.session_state["uoa_df"] = uoa_df
 
 if "cand_df" in st.session_state:
     cand_df = st.session_state["cand_df"]
     spread_df = st.session_state["spread_df"]
+    uoa_df = st.session_state["uoa_df"]
 
     squeeze_count = len(cand_df[cand_df["Squeeze現狀"]]) if not cand_df.empty and "Squeeze現狀" in cand_df.columns else 0
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("掃描標的池", f"{len(DEFAULT_WATCHLIST)} 隻")
     col2.metric("Squeeze 蓄勢中", f"{squeeze_count} 隻")
-    col3.metric("高賠率期權組合", f"{len(spread_df)} 組")
-    col4.metric(f"預算篩選 (< ${max_budget})", f"{max_budget} 美元")
+    col3.metric("高性價比價差組合", f"{len(spread_df)} 組")
+    col4.metric("🚨 主力異動 (UOA)", f"{len(uoa_df)} 個合約")
 
-    st.markdown(f"### 🎯 精選高性價比期權組合 (已過濾 RR ≥ 1 : {min_rr_ratio}，無財報風險與寬點差)")
+    # ---------------- 區塊 1：UOA 主力異動雷達 ----------------
+    st.markdown("### 🚨 期權異常異動雷達 (知情資金爆量掃盤)")
+    if not uoa_df.empty:
+        st.success("以下合約錄得成交量異常暴增 (Volume / OI ≥ 3x)，有主力資金提前佈局痕跡：")
+        st.dataframe(uoa_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("當前候選池標的未錄得異常異動大單。")
+
+    # ---------------- 區塊 2：垂直價差組合 ----------------
+    st.markdown(f"### 🎯 精選垂直價差組合 (小資金高勝率，已過濾點差與財報)")
     if not spread_df.empty and "Cost_Num" in spread_df.columns:
         filtered_spreads = spread_df[spread_df["Cost_Num"] <= max_budget].drop(columns=["Cost_Num", "RR_Num"])
         if not filtered_spreads.empty:
             st.dataframe(filtered_spreads, use_container_width=True, hide_index=True)
         else:
-            st.warning(f"在單注預算 ${max_budget} 內，暫無符合條件且點差合規的期權組合。")
+            st.warning(f"在單注預算 ${max_budget} 內，暫無符合門檻的價差組合。")
     else:
-        st.warning(f"未找到符合要求、點差合規且避開財報的期權組合。")
+        st.warning("未找到符合條件且避開財報的價差組合。")
 
-    st.markdown("### 📋 技術形態候選池")
+    # ---------------- 區塊 3：技術形態候選池 ----------------
+    st.markdown("### 📋 技術形態候選池 (Squeeze 壓縮與均線動量)")
     if not cand_df.empty:
         st.dataframe(cand_df, use_container_width=True, hide_index=True)
     else:
@@ -366,7 +433,7 @@ if "cand_df" in st.session_state:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
-    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Risk Defined Vertical Spreads Strategy"
+    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Dual Engine Architecture"
     f"</div>",
     unsafe_allow_html=True,
 )
