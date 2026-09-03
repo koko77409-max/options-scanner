@@ -53,8 +53,8 @@ st.sidebar.markdown("### 📱 iPhone Bark 推送通知")
 bark_device_key = st.sidebar.text_input(
     "Bark Device Key",
     type="password",
-    help="輸入 iPhone Bark App 提供的專屬 Key (無需包含網址，例如: eXXXXX)",
-    value="",
+    help="輸入 iPhone Bark App 提供的專屬 Key (例如: vARo3iEDmQv6DbVKM8EW79)",
+    value="vARo3iEDmQv6DbVKM8EW79",
 )
 
 # ⏱️ 定時自動巡航開關（固定 5 分鐘）
@@ -581,7 +581,7 @@ def scan_pure_flow(
                   "止盈目標 (+60%)": tp_target,
                   "止損底線 (-35%)": sl_target,
                   "成交量 / OI (倍數)": (
-                      f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)"
+                      f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)"
                   ),
                   "系統判定理由": reason,
               })
@@ -733,5 +733,3 @@ if auto_scan_enabled:
     time.sleep(1)
   run_scan()
   st.rerun()
-
-```
