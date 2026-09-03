@@ -12,9 +12,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.6.0"
+APP_VERSION = "v3.6.1"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Bark Push Notifications + Multi-Expiration Auto-Cruise"
+BUILD_TAG = "Fixed String Literal Syntax + Bark Push + 5-Min Cruise"
 LOG_FILE = "trade_log.csv"
 AUTO_SCAN_INTERVAL_SEC = 300  # 固定 5 分鐘巡航 (300 秒)
 
@@ -603,7 +603,7 @@ def scan_pure_flow(
 
 
 # ==========================================
-# 核心掃描觸發器 (整合 Bark 自動推送)
+# 核心掃描觸發器 (修復換行語法)
 # ==========================================
 def run_scan():
   with st.spinner("正在跨週期穿透核心資產期權鏈 (涵蓋9月與10月大單)..."):
@@ -632,17 +632,21 @@ def run_scan():
             icon="📝",
         )
 
-        # 📱 Bark 即時通知推送
+        # 📱 Bark 即時通知推送 (安全單行格式，絕不語法中斷)
         if bark_device_key:
           for _, row in rec_buys.iterrows():
             title = f"🟢 主力買入信號: {row['標的代號']} {row['異動行使價']}"
-            body = (
+            part1 = (
                 f"成本: ${row['單張成本 ($)']} | 漲幅:"
-                f" {row['合約當日漲跌']}\n大單體量: {row['大單成交額"
-                f" ($)']}\n建議限價: {row['建議買入限價']}\n止盈:"
-                f" {row['止盈目標 (+60%)']} | 止損: {row['止損底線"
-                " (-35%)']}"
+                f" {row['合約當日漲跌']}"
             )
+            part2 = f"大單體量: {row['大單成交額 ($)']}"
+            part3 = f"建議限價: {row['建議買入限價']}"
+            part4 = (
+                f"止盈: {row['止盈目標 (+60%)']} | 止損:"
+                f" {row['止損底線 (-35%)']}"
+            )
+            body = f"{part1}\n{part2}\n{part3}\n{part4}"
             send_bark_alert(bark_device_key, title, body)
 
 
@@ -717,7 +721,7 @@ st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b;"
     f" font-family: monospace;'>OptionsQuant Pro Engine · Release {APP_VERSION}"
-    f" ({BUILD_DATE}) · Bark Push Architecture</div>",
+    f" ({BUILD_DATE}) · Bark Push Syntax Fixed</div>",
     unsafe_allow_html=True,
 )
 
