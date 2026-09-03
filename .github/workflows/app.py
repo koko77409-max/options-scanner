@@ -9,9 +9,9 @@ import yfinance as yf
 # ==========================================
 # 版本號定義
 # ==========================================
-APP_VERSION = "v3.3.0"
+APP_VERSION = "v3.4.0"
 BUILD_DATE = "2026-09-03"
-BUILD_TAG = "Trade Logger Enabled: Auto-logging 'Buy' signals to local CSV"
+BUILD_TAG = "Streamlined: Removed Spread & Sector Filters, Retained Pure Flow & Logger"
 LOG_FILE = "trade_log.csv"
 
 warnings.filterwarnings("ignore")
@@ -56,8 +56,6 @@ min_notional_usd = st.sidebar.number_input("大單權利金總體量 ($)", 10000
 st.sidebar.markdown("### 🛡️ 主力動能硬防護 (防陰跌砸盤)")
 min_contract_gain_pct = st.sidebar.slider("🔥 合約當日最低漲幅 (%)", 0, 50, 10, 5)
 avoid_earnings = st.sidebar.checkbox("自動剔除 7 天內即將公布財報標的", value=True)
-filter_liquidity = st.sidebar.checkbox("自動過濾寬點差合約 (點差 < $0.40)", value=True)
-limit_sector_risk = st.sidebar.checkbox("板塊去重 (同一板塊最多 2 組)", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"構建版本：`{APP_VERSION}` | `{BUILD_DATE}`\n\n特性：`{BUILD_TAG}`")
@@ -68,7 +66,7 @@ with col_title:
         f"## ⚡ 美股期權主力資金流追蹤終端 <span class='version-badge'>{APP_VERSION}</span>",
         unsafe_allow_html=True,
     )
-    st.caption("自動將「🟢 建議買入」高勝率信號沉澱至本地交易紀錄本，支援回測與覆盤")
+    st.caption("聚焦純淨主力買盤穿透，自動記錄「🟢 建議買入」信號至本地歷史紀錄")
 with col_ver:
     st.markdown(
         f"<div style='text-align:right; font-size:12px; color:#94a3b8;'>核心架構：<br><strong style='color:#e2e8f0;'>Release {APP_VERSION}</strong></div>",
@@ -105,7 +103,6 @@ def save_to_log(df_records):
         records.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
     else:
         existing = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-        # 避免重複寫入相同記錄時間與合約
         combined = pd.concat([records, existing], ignore_index=True).drop_duplicates(
             subset=["標的代號", "異動行使價", "到期日", "合約當日漲跌"]
         )
@@ -135,7 +132,7 @@ def check_earnings_risk(ticker_obj):
         pass
     return False
 
-def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, check_liq, avoid_earn, min_notional, min_gain_pct):
+def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, avoid_earn, min_notional, min_gain_pct):
     today = datetime.today()
     uoa_alerts = []
     spread_recommendations = []
@@ -363,7 +360,7 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
                             "建議買入限價": f"${p_price}",
                             "止盈目標 (+60%)": tp_target,
                             "止損底線 (-35%)": sl_target,
-                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({c_ratio}x)",
+                            "成交量 / OI (倍數)": f"{int(p_vol)} / {int(p_oi)} ({p_ratio}x)",
                             "系統判定理由": reason,
                         })
         except Exception:
@@ -376,9 +373,6 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
 
     df_spreads = pd.DataFrame(spread_recommendations)
     if not df_spreads.empty:
-        if limit_sector_risk:
-            df_spreads = df_spreads.sort_values(by="RR_Num", ascending=False)
-            df_spreads = df_spreads.groupby("板塊").head(2).reset_index(drop=True)
         df_spreads = df_spreads.sort_values(by="RR_Num", ascending=False)
 
     return df_uoa, df_spreads
@@ -386,12 +380,11 @@ def scan_pure_flow(tickers, d_min, d_max, min_uoa_v, min_uoa_r, budget, min_rr, 
 if st.button("🚀 開始全市場主力資金流 (UOA) 穿透掃描"):
     with st.spinner("正在逐一穿透 70 隻核心資產期權鏈，執行動能爆發與大單金額算法過濾..."):
         uoa_df, spread_df = scan_pure_flow(
-            DEFAULT_WATCHLIST, dte_min, dte_max, min_uoa_vol, min_vol_oi_ratio, max_budget, min_rr_ratio, filter_liquidity, avoid_earnings, min_notional_usd, min_contract_gain_pct
+            DEFAULT_WATCHLIST, dte_min, dte_max, min_uoa_vol, min_vol_oi_ratio, max_budget, min_rr_ratio, avoid_earnings, min_notional_usd, min_contract_gain_pct
         )
         st.session_state["pure_uoa_df"] = uoa_df
         st.session_state["pure_spread_df"] = spread_df
         
-        # 🔥 自動記錄「🟢 建議買入」標的
         if not uoa_df.empty:
             rec_buys = uoa_df[uoa_df["推薦評級"].str.contains("建議買入")].copy()
             if not rec_buys.empty:
@@ -449,7 +442,7 @@ else:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; font-size: 11px; color: #64748b; font-family: monospace;'>"
-    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Trade Logging Architecture"
+    f"OptionsQuant Pro Engine · Release {APP_VERSION} ({BUILD_DATE}) · Clean Flow Architecture"
     f"</div>",
     unsafe_allow_html=True,
 )
